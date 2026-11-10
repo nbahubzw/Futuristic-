@@ -1,13 +1,12 @@
-package com.orbit.launcher // Change this to match the first line of your MainActivity.kt
+package com.orbit.launcher
 
 /*
  * Orbit Assistant
  * Offline command bar for the Orbit launcher. No internet, no API key.
  *
- *   OrbitAssistant.show(activity)                         open the command bar
- *   OrbitAssistant.show(activity, startListening = true)  open it and start the mic straight away
- *   OrbitAssistant.recordLaunch(context, packageName)     call this when your own app drawer opens an app,
- *                                                         so "Most used" counts those launches too
+ *   OrbitAssistant.show(context)                          open the command bar (swipe up on the home screen)
+ *   OrbitAssistant.show(context, startListening = true)   open it and start the mic straight away
+ *   OrbitAssistant.dismiss()                              close it (returns true if it was open)
  *
  * Understands things like:
  *   open YouTube, yt, you tube, play Subway Surfers, subway, launch whats app, open google maps
@@ -25,6 +24,7 @@ import android.app.Dialog
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -60,6 +60,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Space
 import android.widget.TextView
+import java.lang.ref.WeakReference
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -67,7 +68,7 @@ import java.util.concurrent.Executors
 // Data
 // ------------------------------------------------------------------
 
-data class AppEntry(
+data class AssistantApp(
     val label: String,
     val packageName: String,
     val activityName: String,
@@ -80,7 +81,7 @@ data class AppEntry(
 }
 
 sealed class OrbitCommand {
-    data class OpenApp(val app: AppEntry) : OrbitCommand()
+    data class OpenApp(val app: AssistantApp) : OrbitCommand()
     data class Dial(val number: String) : OrbitCommand()
     data class CallContact(val name: String) : OrbitCommand()
     data class ShowGroup(val group: String) : OrbitCommand()
@@ -105,7 +106,7 @@ object OrbitAssistant {
     private val mainThread by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile
-    private var cache: List<AppEntry> = emptyList()
+    private var cache: List<AssistantApp> = emptyList()
 
     private val CAMEL = Regex("([a-z])([A-Z])")
     private val NON_WORD = Regex("[^\\p{L}\\p{N}]+")
@@ -186,15 +187,39 @@ object OrbitAssistant {
 
     // ---------------- Public API ----------------
 
-    fun show(activity: Activity, startListening: Boolean = false) {
-        OrbitAssistantDialog(activity, startListening).show()
+    private var current: WeakReference<Dialog>? = null
+
+    fun show(context: Context, startListening: Boolean = false) {
+        var c: Context? = context
+        while (c is ContextWrapper && c !is Activity) c = c.baseContext
+        val activity = c as? Activity ?: return
+        if (activity.isFinishing) return
+        dismiss()
+        val dialog = OrbitAssistantDialog(activity, startListening)
+        current = WeakReference(dialog)
+        dialog.show()
+    }
+
+    /** Closes the command bar if it is open. Returns true if it was open. */
+    fun dismiss(): Boolean {
+        val dialog = current?.get()
+        current = null
+        if (dialog != null && dialog.isShowing) {
+            dialog.dismiss()
+            return true
+        }
+        return false
+    }
+
+    internal fun closed(dialog: Dialog) {
+        if (current?.get() === dialog) current = null
     }
 
     /** Last loaded app list (may be empty until loadApps has run once). */
-    fun cachedApps(): List<AppEntry> = cache
+    fun cachedApps(): List<AssistantApp> = cache
 
     /** Loads installed apps in the background. Calls back on the main thread (twice if a cache exists). */
-    fun loadApps(context: Context, onReady: (List<AppEntry>) -> Unit) {
+    fun loadApps(context: Context, onReady: (List<AssistantApp>) -> Unit) {
         val appContext = context.applicationContext
         val cached = cache
         if (cached.isNotEmpty()) onReady(cached)
@@ -211,9 +236,9 @@ object OrbitAssistant {
     }
 
     /** Groups in display order: "Most used" first, then Social, Media, Games, Work, Money, Tools, Other. */
-    fun organise(context: Context, apps: List<AppEntry>): List<Pair<String, List<AppEntry>>> {
+    fun organise(context: Context, apps: List<AssistantApp>): List<Pair<String, List<AssistantApp>>> {
         val p = prefs(context)
-        val sections = ArrayList<Pair<String, List<AppEntry>>>()
+        val sections = ArrayList<Pair<String, List<AssistantApp>>>()
         val mostUsed = apps
             .filter { p.getInt(it.packageName, 0) > 0 }
             .sortedByDescending { p.getInt(it.packageName, 0) }
@@ -227,12 +252,12 @@ object OrbitAssistant {
         return sections
     }
 
-    fun parse(raw: String, apps: List<AppEntry>, context: Context): OrbitCommand {
+    fun parse(raw: String, apps: List<AssistantApp>, context: Context): OrbitCommand {
         val p = prefs(context)
         return parse(raw, apps) { p.getInt(it, 0) }
     }
 
-    internal fun parse(raw: String, apps: List<AppEntry>, usage: (String) -> Int): OrbitCommand {
+    internal fun parse(raw: String, apps: List<AssistantApp>, usage: (String) -> Int): OrbitCommand {
         val cleaned = clean(raw)
         if (cleaned.isEmpty()) return OrbitCommand.Empty
 
@@ -262,12 +287,12 @@ object OrbitAssistant {
         return if (top != null) OrbitCommand.OpenApp(top.first) else OrbitCommand.NotFound(target)
     }
 
-    fun suggestions(raw: String, apps: List<AppEntry>, context: Context, limit: Int = 6): List<AppEntry> {
+    fun suggestions(raw: String, apps: List<AssistantApp>, context: Context, limit: Int = 6): List<AssistantApp> {
         val p = prefs(context)
         return suggestions(raw, apps, limit) { p.getInt(it, 0) }
     }
 
-    internal fun suggestions(raw: String, apps: List<AppEntry>, limit: Int, usage: (String) -> Int): List<AppEntry> =
+    internal fun suggestions(raw: String, apps: List<AssistantApp>, limit: Int, usage: (String) -> Int): List<AssistantApp> =
         rankCleaned(clean(raw), apps, usage).take(limit).map { it.first }
 
     fun describe(cmd: OrbitCommand): String = when (cmd) {
@@ -280,7 +305,7 @@ object OrbitAssistant {
         OrbitCommand.Empty -> ""
     }
 
-    fun launch(context: Context, app: AppEntry): Boolean {
+    fun launch(context: Context, app: AssistantApp): Boolean {
         val intent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
             component = ComponentName(app.packageName, app.activityName)
@@ -351,7 +376,7 @@ object OrbitAssistant {
         return t.replace(LEADING_ARTICLE, "").trim()
     }
 
-    private fun rankCleaned(cleaned: String, apps: List<AppEntry>, usage: (String) -> Int): List<Pair<AppEntry, Int>> {
+    private fun rankCleaned(cleaned: String, apps: List<AssistantApp>, usage: (String) -> Int): List<Pair<AssistantApp, Int>> {
         if (cleaned.isEmpty() || CALL.matches(cleaned)) return emptyList()
         val target = targetOf(cleaned)
         val forms = linkedSetOf(target)
@@ -364,14 +389,14 @@ object OrbitAssistant {
             }
             .filter { it.second >= MIN_SCORE }
             .sortedWith(
-                compareByDescending<Pair<AppEntry, Int>> { it.second }
+                compareByDescending<Pair<AssistantApp, Int>> { it.second }
                     .thenByDescending { usage(it.first.packageName) }
                     .thenBy { it.first.label.length }
             )
             .toList()
     }
 
-    internal fun score(query: String, app: AppEntry): Int {
+    internal fun score(query: String, app: AssistantApp): Int {
         val q = normalise(query)
         val label = app.norm
         if (q.isEmpty() || label.isEmpty()) return 0
@@ -449,11 +474,11 @@ object OrbitAssistant {
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     @Suppress("DEPRECATION")
-    private fun buildIndex(context: Context): List<AppEntry> {
+    private fun buildIndex(context: Context): List<AssistantApp> {
         val pm = context.packageManager
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val infos = pm.queryIntentActivities(intent, 0)
-        val out = ArrayList<AppEntry>(infos.size)
+        val out = ArrayList<AssistantApp>(infos.size)
         val seen = HashSet<String>()
         for (ri in infos) {
             val ai = ri.activityInfo ?: continue
@@ -461,390 +486,4 @@ object OrbitAssistant {
             if (!seen.add(ai.packageName + "/" + ai.name)) continue
             val label = (ri.loadLabel(pm)?.toString() ?: "").trim().ifEmpty { ai.packageName }
             val icon = try { ri.loadIcon(pm) } catch (e: Exception) { null }
-            out.add(AppEntry(label, ai.packageName, ai.name, groupFor(ai.applicationInfo, label, ai.packageName), icon))
-        }
-        out.sortBy { it.label.lowercase(Locale.ROOT) }
-        return out
-    }
-
-    @Suppress("DEPRECATION")
-    internal fun groupFor(ai: ApplicationInfo?, label: String, pkg: String): String {
-        if (ai != null) {
-            if (ai.flags and ApplicationInfo.FLAG_IS_GAME != 0) return "Games"
-            if (Build.VERSION.SDK_INT >= 26) {
-                when (ai.category) {
-                    ApplicationInfo.CATEGORY_GAME -> return "Games"
-                    ApplicationInfo.CATEGORY_SOCIAL -> return "Social"
-                    ApplicationInfo.CATEGORY_AUDIO,
-                    ApplicationInfo.CATEGORY_VIDEO,
-                    ApplicationInfo.CATEGORY_IMAGE,
-                    ApplicationInfo.CATEGORY_NEWS -> return "Media"
-                    ApplicationInfo.CATEGORY_PRODUCTIVITY -> return "Work"
-                    ApplicationInfo.CATEGORY_MAPS -> return "Tools"
-                }
-            }
-        }
-        val text = "$label $pkg".lowercase(Locale.ROOT)
-        for ((group, keys) in GROUP_KEYWORDS) {
-            if (keys.any { text.contains(it) }) return group
-        }
-        return "Other"
-    }
-}
-
-// ------------------------------------------------------------------
-// Command bar UI (built in code, so no layout XML needed)
-// ------------------------------------------------------------------
-
-class OrbitAssistantDialog(
-    private val activity: Activity,
-    private val startListening: Boolean
-) : Dialog(activity, android.R.style.Theme_DeviceDefault_NoActionBar) {
-
-    private val bgColour = 0xF2121318.toInt()
-    private val fieldColour = 0xFF262A33.toInt()
-    private val textMain = Color.WHITE
-    private val textDim = 0xFF9AA0A6.toInt()
-    private val accent = 0xFF8AB4F8.toInt()
-
-    private val match = ViewGroup.LayoutParams.MATCH_PARENT
-    private val wrap = ViewGroup.LayoutParams.WRAP_CONTENT
-
-    private lateinit var input: EditText
-    private lateinit var mic: ImageButton
-    private lateinit var status: TextView
-    private lateinit var results: LinearLayout
-
-    private var apps: List<AppEntry> = emptyList()
-    private var shownGroup: String? = null
-    private var recogniser: SpeechRecognizer? = null
-    private var listening = false
-    private var closed = false
-
-    @Suppress("DEPRECATION")
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContentView(buildLayout())
-        window?.apply {
-            setBackgroundDrawable(ColorDrawable(bgColour))
-            setLayout(match, match)
-            setWindowAnimations(android.R.style.Animation_Dialog)
-            setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or
-                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-            )
-        }
-        render("")
-        OrbitAssistant.loadApps(context) { list ->
-            apps = list
-            if (!closed) render(input.text.toString())
-        }
-        if (startListening) startVoice() else input.requestFocus()
-    }
-
-    override fun onStop() {
-        closed = true
-        recogniser?.destroy()
-        recogniser = null
-        super.onStop()
-    }
-
-    // ---------------- Layout ----------------
-
-    @Suppress("DEPRECATION")
-    private fun buildLayout(): View {
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(8))
-        }
-        if (Build.VERSION.SDK_INT >= 23) {
-            root.setOnApplyWindowInsetsListener { v, insets ->
-                v.setPadding(dp(16), dp(16) + insets.systemWindowInsetTop, dp(16), dp(8) + insets.systemWindowInsetBottom)
-                insets
-            }
-        }
-
-        val bar = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        input = EditText(context).apply {
-            hint = "Ask Orbit: open YouTube, call Mum..."
-            setHintTextColor(textDim)
-            setTextColor(textMain)
-            textSize = 16f
-            isSingleLine = true
-            inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = EditorInfo.IME_ACTION_GO
-            background = rounded(fieldColour, dp(24))
-            setPadding(dp(18), dp(12), dp(18), dp(12))
-            setOnEditorActionListener { _, actionId, event ->
-                val enterKey = event != null && event.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
-                if (actionId == EditorInfo.IME_ACTION_GO || enterKey) {
-                    execute(text.toString())
-                    true
-                } else {
-                    false
-                }
-            }
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                override fun afterTextChanged(s: Editable?) {
-                    shownGroup = null
-                    render(s?.toString().orEmpty())
-                }
-            })
-        }
-        mic = ImageButton(context).apply {
-            setImageResource(android.R.drawable.ic_btn_speak_now)
-            background = rounded(fieldColour, dp(24))
-            contentDescription = "Speak"
-            setOnClickListener { if (listening) stopVoice() else startVoice() }
-        }
-        bar.addView(input, LinearLayout.LayoutParams(0, wrap, 1f))
-        bar.addView(mic, LinearLayout.LayoutParams(dp(48), dp(48)).apply { leftMargin = dp(8) })
-
-        status = TextView(context).apply {
-            setTextColor(textDim)
-            textSize = 13f
-            setPadding(dp(6), dp(10), dp(6), dp(6))
-        }
-
-        results = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        val scroll = ScrollView(context).apply {
-            isVerticalScrollBarEnabled = false
-            addView(results, ViewGroup.LayoutParams(match, wrap))
-        }
-
-        root.addView(bar, LinearLayout.LayoutParams(match, wrap))
-        root.addView(status, LinearLayout.LayoutParams(match, wrap))
-        root.addView(scroll, LinearLayout.LayoutParams(match, 0, 1f))
-        return root
-    }
-
-    private fun render(query: String) {
-        if (closed) return
-        results.removeAllViews()
-        val q = query.trim()
-        val group = shownGroup
-        when {
-            group != null -> {
-                val list = OrbitAssistant.organise(context, apps).firstOrNull { it.first == group }?.second.orEmpty()
-                if (list.isEmpty()) status.text = "No ${group.lowercase(Locale.ROOT)} apps yet" else addSection(group, list)
-            }
-            q.isEmpty() -> {
-                status.text = if (apps.isEmpty()) "Loading your apps..." else "Try: open YouTube, play Subway Surfers, call Mum, dial *151#"
-                for ((name, list) in OrbitAssistant.organise(context, apps)) addSection(name, list)
-            }
-            else -> {
-                status.text = OrbitAssistant.describe(OrbitAssistant.parse(q, apps, context))
-                for (app in OrbitAssistant.suggestions(q, apps, context)) addRow(app)
-            }
-        }
-    }
-
-    private fun addSection(name: String, list: List<AppEntry>) {
-        results.addView(textView(name.uppercase(Locale.ROOT), 12f, accent).apply {
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(6), dp(16), dp(6), dp(4))
-        })
-        for (chunk in list.chunked(4)) {
-            val line = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                weightSum = 4f
-            }
-            for (app in chunk) line.addView(cell(app), LinearLayout.LayoutParams(0, wrap, 1f))
-            repeat(4 - chunk.size) { line.addView(Space(context), LinearLayout.LayoutParams(0, 1, 1f)) }
-            results.addView(line, LinearLayout.LayoutParams(match, wrap))
-        }
-    }
-
-    private fun cell(app: AppEntry): View = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-        setPadding(dp(4), dp(8), dp(4), dp(8))
-        addView(ImageView(context).apply { setImageDrawable(iconFor(app)) }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        addView(textView(app.label, 12f, textMain).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, 0)
-        }, LinearLayout.LayoutParams(match, wrap))
-        setOnClickListener { open(app) }
-    }
-
-    private fun addRow(app: AppEntry) {
-        val row = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(10), dp(8), dp(10))
-            setOnClickListener { open(app) }
-        }
-        row.addView(ImageView(context).apply { setImageDrawable(iconFor(app)) }, LinearLayout.LayoutParams(dp(40), dp(40)))
-        val texts = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), 0, 0, 0)
-        }
-        texts.addView(textView(app.label, 16f, textMain))
-        texts.addView(textView(app.group, 12f, textDim))
-        row.addView(texts, LinearLayout.LayoutParams(0, wrap, 1f))
-        results.addView(row, LinearLayout.LayoutParams(match, wrap))
-    }
-
-    // ---------------- Actions ----------------
-
-    private fun execute(text: String) {
-        when (val cmd = OrbitAssistant.parse(text, apps, context)) {
-            is OrbitCommand.OpenApp -> open(cmd.app)
-            is OrbitCommand.Dial -> dial(cmd.number)
-            is OrbitCommand.CallContact -> callContact(cmd.name)
-            is OrbitCommand.ShowGroup -> {
-                shownGroup = cmd.group
-                render(input.text.toString())
-                if (results.childCount > 0) status.text = "Your ${cmd.group.lowercase(Locale.ROOT)} apps"
-            }
-            is OrbitCommand.NotFound -> status.text = "I couldn't find \"${cmd.query}\""
-            OrbitCommand.OpenDialler -> dial(null)
-            OrbitCommand.Empty -> Unit
-        }
-    }
-
-    private fun open(app: AppEntry) {
-        if (OrbitAssistant.launch(context, app)) dismiss() else status.text = "Couldn't open ${app.label}"
-    }
-
-    private fun dial(number: String?) {
-        val intent = Intent(Intent.ACTION_DIAL).apply {
-            if (number != null) data = Uri.parse("tel:" + Uri.encode(number))
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            context.startActivity(intent)
-            dismiss()
-        } catch (e: ActivityNotFoundException) {
-            status.text = "No phone app found"
-        }
-    }
-
-    private fun callContact(name: String) {
-        if (!hasPermission(Manifest.permission.READ_CONTACTS)) {
-            askPermission(Manifest.permission.READ_CONTACTS)
-            status.text = "Allow contacts access, then try again (or Settings > Apps > Orbit > Permissions)"
-            return
-        }
-        val hit = OrbitAssistant.findContact(context, name)
-        if (hit == null) status.text = "No contact called \"$name\"" else dial(hit.second)
-    }
-
-    // ---------------- Voice ----------------
-
-    private fun startVoice() {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            status.text = "Voice isn't available on this phone. You can still type"
-            return
-        }
-        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
-            askPermission(Manifest.permission.RECORD_AUDIO)
-            status.text = "Allow the microphone, then tap the mic again"
-            return
-        }
-        val rec = recogniser ?: SpeechRecognizer.createSpeechRecognizer(context).also {
-            it.setRecognitionListener(voiceListener)
-            recogniser = it
-        }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-        }
-        listening = true
-        mic.background = rounded(accent, dp(24))
-        status.text = "Listening..."
-        rec.startListening(intent)
-    }
-
-    private fun stopVoice() {
-        recogniser?.stopListening()
-        resetMic()
-    }
-
-    private fun resetMic() {
-        listening = false
-        mic.background = rounded(fieldColour, dp(24))
-    }
-
-    private val voiceListener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {}
-        override fun onBeginningOfSpeech() {}
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-        override fun onEvent(eventType: Int, params: Bundle?) {}
-
-        override fun onEndOfSpeech() {
-            if (!closed) status.text = "Thinking..."
-        }
-
-        override fun onPartialResults(partialResults: Bundle?) {
-            if (closed) return
-            partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let { setInput(it) }
-        }
-
-        override fun onResults(bundle: Bundle?) {
-            if (closed) return
-            resetMic()
-            val heard = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
-            if (heard.isEmpty()) {
-                status.text = "I didn't catch that"
-                return
-            }
-            // The recogniser gives several guesses; use the first one that matches something
-            val best = heard.firstOrNull { OrbitAssistant.parse(it, apps, context) !is OrbitCommand.NotFound } ?: heard.first()
-            setInput(best)
-            input.post { if (!closed) execute(best) }
-        }
-
-        override fun onError(error: Int) {
-            if (closed) return
-            resetMic()
-            status.text = when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH,
-                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "I didn't catch that. Tap the mic and try again"
-                SpeechRecognizer.ERROR_NETWORK,
-                SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Voice needs data or an offline speech pack. You can still type"
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Allow the microphone, then tap the mic again"
-                else -> "Voice stopped (code $error). You can still type"
-            }
-        }
-    }
-
-    // ---------------- Helpers ----------------
-
-    private fun setInput(text: String) {
-        input.setText(text)
-        input.setSelection(input.text.length)
-    }
-
-    private fun hasPermission(permission: String): Boolean =
-        Build.VERSION.SDK_INT < 23 || context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
-
-    private fun askPermission(permission: String) {
-        if (Build.VERSION.SDK_INT >= 23) activity.requestPermissions(arrayOf(permission), 7301)
-    }
-
-    private fun iconFor(app: AppEntry): Drawable? =
-        app.icon?.constantState?.newDrawable(context.resources)?.mutate() ?: app.icon
-
-    private fun textView(s: String, size: Float, colour: Int) = TextView(context).apply {
-        text = s
-        textSize = size
-        setTextColor(colour)
-        maxLines = 1
-        ellipsize = TextUtils.TruncateAt.END
-    }
-
-    private fun rounded(colour: Int, radius: Int) = GradientDrawable().apply {
-        setColor(colour)
-        cornerRadius = radius.toFloat()
-    }
-
-    private fun dp(v: Int): Int = (v * context.resources.displayMetrics.density + 0.5f).toInt()
-}
+            out.add(AssistantApp(label, ai.packageName, ai.name, groupFor(ai.applicationInfo, label, ai.packageName), ic
