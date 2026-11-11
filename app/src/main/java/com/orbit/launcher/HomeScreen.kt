@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.launch
 import java.time.format.TextStyle as DateStyle
@@ -210,7 +211,7 @@ fun HomePage(
     var order by remember(keys) { mutableStateOf(keys) }
     var dragKey by remember { mutableStateOf<String?>(null) }
     var dragPos by remember { mutableStateOf(Offset.Zero) }
-    val slotOffset = if (showWidgets) 8 else 0
+    val slotOffset = if (showWidgets) HERO_ROWS * COLUMNS else 0
 
     BoxWithConstraints(
         modifier
@@ -236,13 +237,13 @@ fun HomePage(
         fun slot(i: Int) = Offset((i % COLUMNS) * cellWpx, (i / COLUMNS) * cellHpx)
 
         if (showWidgets) {
-            val widgetSize = minOf(cellW + iconSize, cellH * 2 - 26.dp)
-            WidgetSlot("Clock", editing, widgetSize, Modifier.offset { slot(0).snap() }.size(cellW * 2, cellH * 2)) {
-                ClockWidget(it)
-            }
-            WidgetSlot("Calendar", editing, widgetSize, Modifier.offset { slot(2).snap() }.size(cellW * 2, cellH * 2)) {
-                CalendarWidget(it)
-            }
+            // Orbit hero: greeting, hacker avatar and reminders leaflet across the top three rows
+            AndroidView(
+                factory = { ctx -> OrbitHeroView(ctx) },
+                modifier = Modifier
+                    .offset { slot(0).snap() }
+                    .size(maxWidth, cellH * HERO_ROWS)
+            )
         }
 
         order.forEachIndexed { index, k ->

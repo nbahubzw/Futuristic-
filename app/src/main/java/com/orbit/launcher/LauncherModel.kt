@@ -42,7 +42,7 @@ import kotlin.math.sin
 
 const val COLUMNS = 4
 const val ROWS = 6
-const val FIRST_PAGE = 16
+const val FIRST_PAGE = 12 // top three rows of page one hold the Orbit hero
 const val PAGE_SIZE = 24
 const val DOCK_SIZE = 4
 
