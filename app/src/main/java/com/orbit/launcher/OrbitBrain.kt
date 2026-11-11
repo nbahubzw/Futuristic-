@@ -8,7 +8,7 @@ import java.util.Locale
 
 // Orbit hero, brain: understands what you say to the avatar. Plain Kotlin, works offline.
 
-enum class ReminderRepeat { NONE, DAILY, WEEKLY }
+enum class ReminderRepeat { NONE, DAILY, WEEKDAYS, WEEKLY, MONTHLY }
 
 /** A reminder understood from speech or typing. time == null means a note with no alarm. */
 data class ParsedReminder(val text: String, val time: LocalDateTime?, val repeat: ReminderRepeat)
@@ -17,6 +17,10 @@ sealed class HeroIntent {
     data class SetName(val name: String) : HeroIntent()
     data class AddReminder(val reminder: ParsedReminder) : HeroIntent()
     object ListReminders : HeroIntent()
+    data class DayBrief(val daysAhead: Int) : HeroIntent()
+    object WhatsNext : HeroIntent()
+    object WhatsDue : HeroIntent()
+    object VoiceSettings : HeroIntent()
     object ClearDone : HeroIntent()
     object TellTime : HeroIntent()
     object TellDate : HeroIntent()
@@ -52,10 +56,34 @@ object OrbitBrain {
     private val REMIND = Regex("^(?:remind me|set (?:a |an |me a )?reminder|add (?:a )?reminder|create (?:a )?reminder|new reminder|make a reminder|reminder|don'?t let me forget)\\b", IC)
     private val TIME_Q = Regex("\\bwhat'?s the time\\b|\\bwhat time is it\\b|^(?:the )?time(?: now)?$|\\bcurrent time\\b|\\btell me the time\\b", IC)
     private val DATE_Q = Regex("\\bwhat'?s the date\\b|\\bwhat is the date\\b|\\bwhat date\\b|\\bwhat day is (?:it|today)\\b|\\btoday'?s date\\b|^(?:the )?date$", IC)
-    private val LIST_Q = Regex(
-        "\\b(?:schedule|reminders?|agenda|leaflet|to-?do list)\\b|^what do i have\\b|\\bwhat'?s (?:on )?(?:for )?today\\b|\\bwhat'?s next\\b|\\bmy plans?\\b",
+    private val LIST_Q = Regex("\\b(?:schedule|reminders?|agenda|leaflet|to-?do list|my tasks|tasks)\\b|\\bmy plans?\\b", IC)
+    private val DAY_Q = Regex(
+        "\\bmy day\\b|\\bbrief(?:ing)? me\\b|^(?:daily |morning )?briefing\\b|\\bplan for (?:today|tomorrow)\\b|\\b(?:today|tomorrow)'?s plan\\b|" +
+            "^what (?:do|have) i (?:got|have)\\b|^what do i have\\b|\\bwhat'?s on (?:for )?(?:today|tomorrow)\\b|\\bwhat'?s (?:happening )?(?:today|tomorrow)\\b|" +
+            "\\bwhat does (?:today|tomorrow|my day) look like\\b|\\bhow (?:does|is) (?:my day|today|tomorrow) looking\\b|\\bwhat'?s tomorrow\\b",
         IC
     )
+    private val NEXT_Q = Regex("\\bwhat'?s next\\b|\\bwhat is next\\b|\\bnext (?:task|reminder|thing|up)\\b|\\bup next\\b|\\bwhat'?s coming up\\b|\\bwhat comes next\\b", IC)
+    private val DUE_Q = Regex("\\bwhat'?s due\\b|\\bwhat is due\\b|\\banything due\\b|\\b(?:what'?s |anything )?overdue\\b|\\bwhat (?:did|have) i miss(?:ed)?\\b|\\bpending\\b|\\bdue (?:now|today|soon)\\b", IC)
+    private val ACCENT_Q = Regex("\\b(?:change (?:the |my )?accent|accent|voice settings|speech settings|change (?:the )?language)\\b", IC)
+
+    // Words speech recognition often mishears in a Southern African accent, fixed before anything else
+    private val HEARD_FIXES = listOf(
+        Regex("^(?:remain|remained|remains|reminder|re mind|remine|remind be|remind mi)\\s+(?:me\\s+)?", IC) to "remind me ",
+        Regex("\\bremind be\\b", IC) to "remind me",
+        Regex("\\bwhat'?s (?:the )?(?:nest|necks|neck|nets|nerds)\\b", IC) to "what's next",
+        Regex("\\bwhat'?s (?:the )?(?:do|dew|jew)\\b", IC) to "what's due",
+        Regex("^(?:oven|opened|opening|open up)\\s+", IC) to "open ",
+        Regex("\\b(?:shedule|skedule|schedual|shejule)\\b", IC) to "schedule",
+        Regex("\\bevery week day\\b", IC) to "every weekday"
+    )
+
+    /** Tidies what the speech recogniser heard before Orbit tries to understand it. */
+    fun fixHeard(raw: String): String {
+        var t = raw.trim()
+        for ((r, to) in HEARD_FIXES) t = r.replace(t, to)
+        return t.replace(Regex("\\s+"), " ").trim()
+    }
     private val CLEAR_Q = Regex("^(?:clear|delete|remove)\\b.*\\b(?:done|completed|finished|ticked)\\b", IC)
     private val MUTE = Regex("^(?:be quiet|quiet|mute|shut up|stop talking|silent(?: mode)?|voice off|don'?t (?:talk|speak))\\b", IC)
     private val UNMUTE = Regex("^(?:unmute|voice on|talk to me|speak(?: up)?|sound on)\\b", IC)
@@ -77,6 +105,10 @@ object OrbitBrain {
         if (TIME_Q.containsMatchIn(s)) return HeroIntent.TellTime
         if (DATE_Q.containsMatchIn(s)) return HeroIntent.TellDate
         if (CLEAR_Q.containsMatchIn(s)) return HeroIntent.ClearDone
+        if (ACCENT_Q.containsMatchIn(s)) return HeroIntent.VoiceSettings
+        if (DUE_Q.containsMatchIn(s)) return HeroIntent.WhatsDue
+        if (NEXT_Q.containsMatchIn(s)) return HeroIntent.WhatsNext
+        if (DAY_Q.containsMatchIn(s)) return HeroIntent.DayBrief(if (Regex("\\btomorrow\\b", IC).containsMatchIn(s)) 1 else 0)
         if (LIST_Q.containsMatchIn(s)) return HeroIntent.ListReminders
         if (MUTE.containsMatchIn(s)) return HeroIntent.Voice(false)
         if (UNMUTE.containsMatchIn(s)) return HeroIntent.Voice(true)
@@ -86,7 +118,7 @@ object OrbitBrain {
         return HeroIntent.Other(s)
     }
 
-    /** "lorac  mapiravana please" -> "Lorac Mapiravana". Keeps at most three words. */
+    /** "roy  please" -> "Roy". Keeps at most three words. */
     fun cleanName(raw: String): String =
         raw.replace(Regex("\\b(?:please|thanks|thank you)\\b", IC), " ")
             .replace(Regex("[^\\p{L}\\s'-]"), " ")
@@ -112,6 +144,10 @@ object OrbitBrain {
             "make a reminder|reminder|don'?t let me forget)(?:\\s+(?:to|about|that|for|of))?(?=\\s|$)",
         IC
     )
+    private val REPEAT_WEEKDAYS = Regex(
+        "\\b(?:every\\s+weekday|on\\s+weekdays|weekdays|every\\s+working\\s+day|every\\s+work\\s*day|monday\\s+to\\s+friday|mon\\s*-\\s*fri)\\b", IC
+    )
+    private val REPEAT_MONTHLY = Regex("\\b(?:every\\s+month|monthly|each\\s+month)\\b", IC)
     private val REPEAT_DAILY = Regex("\\b(?:every\\s*day|daily|each day|every (morning|afternoon|evening|night))\\b", IC)
     private val REPEAT_WEEKLY = Regex("\\bevery\\s+($DAYS)s?\\b", IC)
     private val RELATIVE = Regex(
@@ -193,7 +229,9 @@ object OrbitBrain {
         var nextWeek = false
 
         // Repeats
-        take(REPEAT_WEEKLY)?.let { repeat = ReminderRepeat.WEEKLY; weeklyDay = weekday(it.groupValues[1]) }
+        take(REPEAT_WEEKDAYS)?.let { repeat = ReminderRepeat.WEEKDAYS }
+        if (repeat == ReminderRepeat.NONE) take(REPEAT_MONTHLY)?.let { repeat = ReminderRepeat.MONTHLY }
+        if (repeat == ReminderRepeat.NONE) take(REPEAT_WEEKLY)?.let { repeat = ReminderRepeat.WEEKLY; weeklyDay = weekday(it.groupValues[1]) }
         if (repeat == ReminderRepeat.NONE) take(REPEAT_DAILY)?.let {
             repeat = ReminderRepeat.DAILY
             if (it.groupValues[1].isNotEmpty()) pod = it.groupValues[1]
@@ -324,6 +362,23 @@ object OrbitBrain {
             if (!at.isAfter(now)) at = at.plusDays(1)
             return ParsedReminder(task, at, repeat)
         }
+        if (repeat == ReminderRepeat.WEEKDAYS) {
+            val t = time ?: LocalTime.of(8, 0)
+            val start = LocalDateTime.of(today, t)
+            val first = if (start.isAfter(now) && start.dayOfWeek.value <= 5) start else nextRepeat(start, repeat, now)!!
+            return ParsedReminder(task, first, repeat)
+        }
+        if (repeat == ReminderRepeat.MONTHLY) {
+            val t = time ?: LocalTime.of(9, 0)
+            val day = date?.dayOfMonth ?: today.dayOfMonth
+            val base = today.withDayOfMonth(minOf(day, today.lengthOfMonth()))
+            var at = LocalDateTime.of(base, t)
+            if (!at.isAfter(now)) {
+                val nm = today.plusMonths(1)
+                at = LocalDateTime.of(nm.withDayOfMonth(minOf(day, nm.lengthOfMonth())), t)
+            }
+            return ParsedReminder(task, at, repeat)
+        }
         if (repeat == ReminderRepeat.WEEKLY) {
             val t = time ?: LocalTime.of(9, 0)
             val ahead = (weeklyDay!!.value - today.dayOfWeek.value + 7) % 7
@@ -363,14 +418,40 @@ object OrbitBrain {
 
     /** Next time a repeating reminder should ring, strictly after now. */
     fun nextRepeat(time: LocalDateTime, repeat: ReminderRepeat, now: LocalDateTime): LocalDateTime? {
-        val step = when (repeat) {
-            ReminderRepeat.DAILY -> 1L
-            ReminderRepeat.WEEKLY -> 7L
-            ReminderRepeat.NONE -> return null
-        }
         var t = time
-        while (!t.isAfter(now)) t = t.plusDays(step)
+        when (repeat) {
+            ReminderRepeat.NONE -> return null
+            ReminderRepeat.DAILY -> while (!t.isAfter(now)) t = t.plusDays(1)
+            ReminderRepeat.WEEKLY -> while (!t.isAfter(now)) t = t.plusDays(7)
+            ReminderRepeat.WEEKDAYS -> while (!t.isAfter(now) || t.dayOfWeek.value > 5) t = t.plusDays(1)
+            ReminderRepeat.MONTHLY -> {
+                val day = time.dayOfMonth
+                var months = 0L
+                while (!t.isAfter(now)) {
+                    months++
+                    val d = time.toLocalDate().withDayOfMonth(1).plusMonths(months)
+                    t = LocalDateTime.of(d.withDayOfMonth(minOf(day, d.lengthOfMonth())), time.toLocalTime())
+                }
+            }
+        }
         return t
+    }
+
+    /** "every day", "every weekday", "every Monday", "every month on the 25th". */
+    fun repeatPhrase(repeat: ReminderRepeat, time: LocalDateTime): String = when (repeat) {
+        ReminderRepeat.NONE -> ""
+        ReminderRepeat.DAILY -> "every day"
+        ReminderRepeat.WEEKDAYS -> "every weekday"
+        ReminderRepeat.WEEKLY -> "every " + time.dayOfWeek.getDisplayName(java.time.format.TextStyle.FULL, Locale.UK)
+        ReminderRepeat.MONTHLY -> "every month on the " + ordinal(time.dayOfMonth)
+    }
+
+    fun ordinal(n: Int): String = n.toString() + when {
+        n % 100 in 11..13 -> "th"
+        n % 10 == 1 -> "st"
+        n % 10 == 2 -> "nd"
+        n % 10 == 3 -> "rd"
+        else -> "th"
     }
 
     private fun safeDate(year: Int?, month: Int, day: Int, today: LocalDate?): LocalDate? {

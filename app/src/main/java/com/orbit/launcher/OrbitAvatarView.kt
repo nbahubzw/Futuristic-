@@ -16,8 +16,8 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 
-// Orbit hero, avatar: an animated hooded "hacker" with a glowing visor, falling code and HUD rings.
-// Colour shows the mood: cyan idle, magenta listening, amber thinking, green speaking.
+// Orbit hero, avatar: an animated hooded figure with a glowing visor, faint falling code and fine rings.
+// Colour shows the mood using iOS system colours: teal idle, pink listening, orange thinking, green speaking.
 
 class OrbitAvatarView(context: Context) : View(context) {
 
@@ -40,10 +40,6 @@ class OrbitAvatarView(context: Context) : View(context) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
     private val code = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
-    private val hud = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        textAlign = Paint.Align.CENTER
-    }
 
     private var cx = 0f
     private var cy = 0f
@@ -55,6 +51,7 @@ class OrbitAvatarView(context: Context) : View(context) {
     private val visor = RectF()
     private val tmp = RectF()
     private var discShader: Shader? = null
+    private var glossShader: Shader? = null
     private val glowShaders = HashMap<Mode, Shader>()
     private val visorShaders = HashMap<Mode, Shader>()
     private var columns = 0
@@ -68,10 +65,10 @@ class OrbitAvatarView(context: Context) : View(context) {
     }
 
     private fun accent(m: Mode = mode): Int = when (m) {
-        Mode.IDLE -> 0xFF00E5FF.toInt()
-        Mode.LISTENING -> 0xFFFF2BD6.toInt()
-        Mode.THINKING -> 0xFFFFB300.toInt()
-        Mode.SPEAKING -> 0xFF39FF14.toInt()
+        Mode.IDLE -> 0xFF64D2FF.toInt()
+        Mode.LISTENING -> 0xFFFF375F.toInt()
+        Mode.THINKING -> 0xFFFF9F0A.toInt()
+        Mode.SPEAKING -> 0xFF30D158.toInt()
     }
 
     private fun withAlpha(color: Int, alpha: Int): Int = (color and 0x00FFFFFF) or (alpha.coerceIn(0, 255) shl 24)
@@ -97,14 +94,15 @@ class OrbitAvatarView(context: Context) : View(context) {
         faceClip.addOval(face, Path.Direction.CW)
         visor.set(cx - 0.33f * r, cy - 0.13f * r, cx + 0.33f * r, cy + 0.06f * r)
 
-        discShader = RadialGradient(cx, cy, r * 0.86f, 0xF00A1420.toInt(), 0xF0020407.toInt(), Shader.TileMode.CLAMP)
+        discShader = RadialGradient(cx, cy - r * 0.2f, r * 1.0f, 0xF2141A22.toInt(), 0xF2030508.toInt(), Shader.TileMode.CLAMP)
+        glossShader = LinearGradient(0f, cy - r * 0.86f, 0f, cy, 0x2EFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP)
         glowShaders.clear()
         visorShaders.clear()
         for (m in Mode.values()) {
             val a = accent(m)
             glowShaders[m] = RadialGradient(
                 cx, cy, r * 1.2f,
-                intArrayOf(withAlpha(a, 0), withAlpha(a, 0), withAlpha(a, 0x55), withAlpha(a, 0)),
+                intArrayOf(withAlpha(a, 0), withAlpha(a, 0), withAlpha(a, 0x3A), withAlpha(a, 0)),
                 floatArrayOf(0f, 0.62f, 0.72f, 1f), Shader.TileMode.CLAMP
             )
             visorShaders[m] = LinearGradient(
@@ -119,7 +117,6 @@ class OrbitAvatarView(context: Context) : View(context) {
         columns = max(1, ((r * 1.72f) / colW).toInt())
         colSpeed = FloatArray(columns) { 0.6f + ((it * 37) % 11) / 10f }
         colOffset = FloatArray(columns) { ((it * 53) % 17) / 17f }
-        hud.textSize = max(7f, r * 0.085f)
     }
 
     override fun onAttachedToWindow() {
@@ -185,7 +182,7 @@ class OrbitAvatarView(context: Context) : View(context) {
                 val y = top + head - j * step
                 if (y < top - step || y > top + height + step) continue
                 val g = ((i * 31 + j * 17 + tick + (head / step).toInt()) and 0x7fffffff) % glyphs.size
-                code.color = withAlpha(0xFF39FF14.toInt(), if (j == 0) 150 else (95 - j * 11))
+                code.color = withAlpha(0xFF30D158.toInt(), if (j == 0) 80 else (52 - j * 6))
                 canvas.drawText(glyphs, g, 1, left + i * colW, y, code)
             }
         }
@@ -196,8 +193,8 @@ class OrbitAvatarView(context: Context) : View(context) {
         canvas.clipPath(disc)
         fill.color = 0xFF05080C.toInt()
         canvas.drawPath(hood, fill)
-        stroke.strokeWidth = 1.5f * density
-        stroke.color = withAlpha(a, 0x99)
+        stroke.strokeWidth = 1.2f * density
+        stroke.color = withAlpha(a, 0x80)
         canvas.drawPath(hood, stroke)
         canvas.restore()
 
@@ -261,18 +258,26 @@ class OrbitAvatarView(context: Context) : View(context) {
             canvas.drawRoundRect(tmp, bw / 2, bw / 2, fill)
         }
 
-        // HUD rings
+        // Glass highlight on the top half of the disc
+        fill.shader = glossShader
+        canvas.drawCircle(cx, cy, r * 0.86f, fill)
+        fill.shader = null
+        stroke.strokeWidth = 1f * density
+        stroke.color = 0x33FFFFFF
+        canvas.drawCircle(cx, cy, r * 0.86f, stroke)
+
+        // Rings
         val spin = when (mode) {
             Mode.THINKING -> 140f
             Mode.LISTENING -> 70f
             else -> 28f
         }
-        stroke.strokeWidth = 2.5f * density
-        stroke.color = a
-        tmp.set(cx - r * 0.93f, cy - r * 0.93f, cx + r * 0.93f, cy + r * 0.93f)
-        for (k in 0 until 3) canvas.drawArc(tmp, t * spin + k * 120f, 70f, false, stroke)
-        stroke.strokeWidth = 1f * density
-        stroke.color = withAlpha(a, 0x70)
+        stroke.strokeWidth = 2f * density
+        stroke.color = withAlpha(a, 0xE6)
+        tmp.set(cx - r * 0.94f, cy - r * 0.94f, cx + r * 0.94f, cy + r * 0.94f)
+        for (k in 0 until 3) canvas.drawArc(tmp, t * spin + k * 120f, 64f, false, stroke)
+        stroke.strokeWidth = 0.8f * density
+        stroke.color = withAlpha(a, 0x45)
         val rot = -t * 12f
         for (k in 0 until 48) {
             val ang = Math.toRadians((rot + k * 7.5f).toDouble())
@@ -282,16 +287,6 @@ class OrbitAvatarView(context: Context) : View(context) {
             val s = Math.sin(ang).toFloat()
             canvas.drawLine(cx + c * inner, cy + s * inner, cx + c * outer, cy + s * outer, stroke)
         }
-
-        // Status tag
-        hud.color = withAlpha(a, 0xCC)
-        val tag = when (mode) {
-            Mode.IDLE -> "ORBIT // READY"
-            Mode.LISTENING -> "REC ● LISTENING"
-            Mode.THINKING -> "PROCESSING"
-            Mode.SPEAKING -> "TRANSMITTING"
-        }
-        canvas.drawText(tag, cx, cy + r * 0.74f, hud)
 
         if (running) {
             if (mode == Mode.IDLE) postInvalidateDelayed(40) else postInvalidateOnAnimation()

@@ -1,6 +1,7 @@
 package com.orbit.launcher
 
 import android.app.AlarmManager
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -12,6 +13,7 @@ import android.content.SharedPreferences
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.text.format.DateFormat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -24,6 +26,8 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 
 // Orbit hero, reminders: saving, alarms, notifications (with Done and Snooze buttons).
+// When a task is due and the phone is locked or the screen is off, a real alarm rings full screen.
+// When you are using the phone, it shows as a notification instead.
 
 data class Reminder(
     val id: Long,
@@ -52,6 +56,10 @@ object OrbitProfile {
     fun setVoiceOn(context: Context, on: Boolean) = prefs(context).edit().putBoolean("voice", on).apply()
     fun lastGreeting(context: Context): String = prefs(context).getString("last_greeting", "") ?: ""
     fun setLastGreeting(context: Context, key: String) = prefs(context).edit().putString("last_greeting", key).apply()
+
+    /** Speech recognition language. South African English is the closest Google model to Zimbabwean English. */
+    fun speechLocale(context: Context): String = prefs(context).getString("speech_locale", "en-ZA") ?: "en-ZA"
+    fun setSpeechLocale(context: Context, tag: String) = prefs(context).edit().putString("speech_locale", tag).apply()
 }
 
 object ReminderStore {
@@ -145,6 +153,29 @@ object ReminderStore {
         }
     }
 
+    /** Changes a task from the edit sheet and moves its alarm. */
+    fun edit(context: Context, id: Long, text: String, time: LocalDateTime?, repeat: ReminderRepeat): Reminder? {
+        ReminderAlarms.cancel(context, id)
+        ReminderNotifier.cancel(context, id)
+        val r = update(context, id) {
+            it.copy(text = text, time = time?.toMillis(), repeat = if (time == null) ReminderRepeat.NONE else repeat)
+        }
+        if (r != null && !r.done) ReminderAlarms.schedule(context, r)
+        return r
+    }
+
+    /** Rings again in a few minutes. A repeating task gets a one-off copy so its schedule stays the same. */
+    fun snooze(context: Context, id: Long, minutes: Long = 10) {
+        val r = find(context, id) ?: return
+        ReminderNotifier.cancel(context, id)
+        val at = LocalDateTime.now().plusMinutes(minutes).withSecond(0).withNano(0)
+        if (r.repeat == ReminderRepeat.NONE) {
+            update(context, id) { it.copy(time = at.toMillis(), done = false, doneAt = null) }?.let { ReminderAlarms.schedule(context, it) }
+        } else {
+            add(context, ParsedReminder(r.text, at, ReminderRepeat.NONE))
+        }
+    }
+
     fun delete(context: Context, id: Long) {
         update(context, id) { null }
         ReminderAlarms.cancel(context, id)
@@ -183,7 +214,12 @@ object ReminderAlarms {
             if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
                 am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
             } else {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+                // Alarm-clock alarms are exact, wake the phone from deep sleep and show the alarm icon
+                val open = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                val show = open?.let {
+                    PendingIntent.getActivity(context, 0, it, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                }
+                am.setAlarmClock(AlarmManager.AlarmClockInfo(at, show), pi)
             }
         } catch (e: SecurityException) {
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
@@ -224,6 +260,71 @@ object ReminderAlarms {
 
 object ReminderNotifier {
     private const val CHANNEL = "orbit_reminders"
+    private const val ALARM_CHANNEL = "orbit_task_alarms"
+
+    private fun ensureAlarmChannel(context: Context) {
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        if (nm.getNotificationChannel(ALARM_CHANNEL) == null) {
+            val ch = NotificationChannel(ALARM_CHANNEL, "Orbit task alarms", NotificationManager.IMPORTANCE_HIGH)
+            ch.description = "Full-screen alarm when a task is due and the phone is locked"
+            ch.setSound(null, null) // the alarm screen plays the ringtone itself
+            ch.enableVibration(false)
+            ch.lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            nm.createNotificationChannel(ch)
+        }
+    }
+
+    /** True when Android lets Orbit open the alarm screen over the lock screen. */
+    fun canRing(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < 34) return true
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return false
+        return nm.canUseFullScreenIntent()
+    }
+
+    /** Rings: opens the full-screen alarm (Android shows it when the phone is locked or asleep). */
+    fun showAlarm(context: Context, r: Reminder, name: String) {
+        ensureAlarmChannel(context)
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        val screen = PendingIntent.getActivity(
+            context, r.id.toInt() * 4 + 3, TaskAlarmActivity.intent(context, r.id),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val title = if (name.isBlank()) "Task due" else "$name, it's time"
+        val builder = Notification.Builder(context, ALARM_CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle(title)
+            .setContentText(r.text)
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setFullScreenIntent(screen, true)
+            .setContentIntent(screen)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.ic_lock_idle_alarm), "Snooze",
+                    actionIntent(context, r.id, ReminderReceiver.ACTION_SNOOZE, r.id.toInt() * 4 + 2)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(context, android.R.drawable.checkbox_on_background), "Stop",
+                    actionIntent(context, r.id, ReminderReceiver.ACTION_DONE, r.id.toInt() * 4 + 1)
+                ).build()
+            )
+        try {
+            nm.notify(notificationId(r.id), builder.build())
+        } catch (e: SecurityException) {
+            show(context, r, name)
+        }
+    }
+
+    private fun actionIntent(context: Context, id: Long, act: String, code: Int): PendingIntent {
+        val i = Intent(context, ReminderReceiver::class.java)
+            .setAction(act)
+            .setData(Uri.parse("orbit://reminder/$id/$act"))
+            .putExtra(ReminderReceiver.EXTRA_ID, id)
+        return PendingIntent.getBroadcast(context, code, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
 
     private fun ensureChannel(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
@@ -300,7 +401,14 @@ class ReminderReceiver : BroadcastReceiver() {
             ACTION_FIRE -> {
                 val r = ReminderStore.find(context, id) ?: return
                 if (r.done) return
-                ReminderNotifier.show(context, r, OrbitProfile.name(context))
+                val power = context.getSystemService(PowerManager::class.java)
+                val keyguard = context.getSystemService(KeyguardManager::class.java)
+                val away = power?.isInteractive == false || keyguard?.isKeyguardLocked == true
+                if (away && ReminderNotifier.canRing(context)) {
+                    ReminderNotifier.showAlarm(context, r, OrbitProfile.name(context))
+                } else {
+                    ReminderNotifier.show(context, r, OrbitProfile.name(context))
+                }
                 if (r.repeat != ReminderRepeat.NONE) {
                     ReminderStore.advance(context, id)?.let { ReminderAlarms.schedule(context, it) }
                 }
@@ -309,16 +417,11 @@ class ReminderReceiver : BroadcastReceiver() {
                 val r = ReminderStore.find(context, id)
                 if (r != null && r.repeat == ReminderRepeat.NONE) ReminderStore.setDone(context, id, true)
                 ReminderNotifier.cancel(context, id)
+                TaskAlarmActivity.close(id)
             }
             ACTION_SNOOZE -> {
-                val r = ReminderStore.find(context, id) ?: return
-                ReminderNotifier.cancel(context, id)
-                val at = LocalDateTime.now().plusMinutes(10).withSecond(0).withNano(0)
-                if (r.repeat == ReminderRepeat.NONE) {
-                    ReminderStore.update(context, id) { it.copy(time = at.toMillis()) }?.let { ReminderAlarms.schedule(context, it) }
-                } else {
-                    ReminderStore.add(context, ParsedReminder(r.text, at, ReminderRepeat.NONE))
-                }
+                ReminderStore.snooze(context, id)
+                TaskAlarmActivity.close(id)
             }
             else -> ReminderAlarms.rescheduleAll(context) // boot, app update, clock or time zone change
         }

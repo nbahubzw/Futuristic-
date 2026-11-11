@@ -129,6 +129,7 @@ fun LauncherRoot(model: LauncherModel, stopSignal: Int, homeSignal: Int, onWallp
     fun closeAll(): Boolean {
         val anyOpen = menu != null || spotlight || notifications || folder != null || removing != null || editing
         val assistantOpen = OrbitAssistant.dismiss()
+        val tasksOpen = OrbitTasks.dismiss()
         menu = null
         spotlight = false
         notifications = false
@@ -136,7 +137,7 @@ fun LauncherRoot(model: LauncherModel, stopSignal: Int, homeSignal: Int, onWallp
         removing = null
         editing = false
         focusManager.clearFocus()
-        return anyOpen || assistantOpen
+        return anyOpen || assistantOpen || tasksOpen
     }
 
     LaunchedEffect(stopSignal) { if (stopSignal > 0) closeAll() }
@@ -220,12 +221,13 @@ fun LauncherRoot(model: LauncherModel, stopSignal: Int, homeSignal: Int, onWallp
                             total += dy
                             if (!fired && total > 56.dp.toPx() && pagerState.currentPage < model.pages.size) {
                                 fired = true
-                                if (startY < size.height * 0.22f) notifications = true else spotlight = true
+                                // Pull from the very top for notifications, anywhere else for your tasks
+                                if (startY < size.height * 0.22f) notifications = true else OrbitTasks.show(context)
                             }
-                            // Swipe up opens the Orbit Assistant
+                            // Swipe up also opens your tasks (search stays on the Search button)
                             if (!fired && total < -56.dp.toPx() && pagerState.currentPage < model.pages.size) {
                                 fired = true
-                                OrbitAssistant.show(context)
+                                OrbitTasks.show(context)
                             }
                         }
                     )

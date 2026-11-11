@@ -1,17 +1,12 @@
 package com.orbit.launcher
 
 import android.Manifest
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -24,10 +19,6 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.text.InputType
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.TextUtils
-import android.text.style.ForegroundColorSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
@@ -37,36 +28,30 @@ import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 // Orbit hero: the top of the main home screen. Greets you by name, listens when you tap the avatar,
-// talks back, and keeps your reminders on a leaflet.
+// talks back, and shows your tasks on the Leaflet widget. Swipe on the home screen for the full Tasks view.
 
 const val HERO_ROWS = 3
 
 class OrbitHeroView(context: Context) : LinearLayout(context) {
 
-    private val cyan = 0xFF00E5FF.toInt()
-    private val green = 0xFF39FF14.toInt()
-    private val amber = 0xFFFFB300.toInt()
-    private val white = Color.WHITE
-    private val dim = 0xCCFFFFFF.toInt()
-    private val faint = 0x80FFFFFF.toInt()
-    private val mono = Typeface.MONOSPACE
-    private val monoBold = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-    private val dialogTheme = android.R.style.Theme_Material_Dialog_Alert
+    private val c = IosColors.of(context)
+    private val dialogTheme = if (c.dark) android.R.style.Theme_DeviceDefault_Dialog_Alert else android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+    private val shadow = 0x59000000
 
     private val ui = Handler(Looper.getMainLooper())
     private val greetingView: TextView
     private val subline: TextView
     private val avatar: OrbitAvatarView
-    private val status: TextView
-    private val leafletItems: LinearLayout
+    private val caption: TextView
+    private val captionIcon: Glyph
     private val leafletCount: TextView
+    private val leafletItems: LinearLayout
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -75,9 +60,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
     private var listening = false
     private var attached = false
     private var askedName = false
-    private var greetingTarget = ""
-    private var typed = 0
-    private var cursorOn = true
+    private var shownGreeting = ""
     private var leafletCapacity = 4
 
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -88,108 +71,82 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         orientation = VERTICAL
         clipChildren = false
         clipToPadding = false
-        setPadding(dp(8), dp(2), dp(8), dp(4))
+        setPadding(dp(8), 0, dp(8), dp(4))
 
-        greetingView = TextView(context).apply {
-            typeface = monoBold
-            setTextColor(white)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            letterSpacing = 0.04f
-            setAutoSizeTextTypeUniformWithConfiguration(12, 20, 1, TypedValue.COMPLEX_UNIT_SP)
-            shadow(this)
-            setOnClickListener { askName(first = false) }
+        greetingView = context.label("", 30f, Color.WHITE, IosType.bold).apply {
+            setAutoSizeTextTypeUniformWithConfiguration(20, 30, 1, TypedValue.COMPLEX_UNIT_SP)
+            setShadowLayer(10f, 0f, 1f, shadow)
+            pressable { askName(first = false) }
         }
-        subline = TextView(context).apply {
-            typeface = mono
-            textSize = 12f
-            setTextColor(cyan)
-            maxLines = 1
-            ellipsize = TextUtils.TruncateAt.END
-            shadow(this)
-            setOnClickListener { openCalendar() }
+        subline = context.label("", 15f, 0xE6FFFFFF.toInt(), IosType.medium).apply {
+            setShadowLayer(8f, 0f, 1f, shadow)
+            pressable { openCalendar() }
         }
-        addView(greetingView, LayoutParams(LayoutParams.MATCH_PARENT, dp(28)))
-        addView(subline, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        addView(greetingView, LayoutParams(LayoutParams.MATCH_PARENT, dp(38)))
+        addView(subline, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply { topMargin = dp(2) })
 
         val row = LinearLayout(context).apply { orientation = HORIZONTAL }
 
+        // Left: avatar and caption pill
         val left = LinearLayout(context).apply {
             orientation = VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
         }
         avatar = OrbitAvatarView(context).apply { setOnClickListener { onAvatarTap() } }
-        status = TextView(context).apply {
-            typeface = mono
-            textSize = 10.5f
-            setTextColor(dim)
-            maxLines = 2
-            ellipsize = TextUtils.TruncateAt.END
-            gravity = Gravity.CENTER
-            shadow(this)
-            setOnClickListener { showCommandDialog() }
-        }
         left.addView(avatar, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
-        left.addView(status, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        val pill = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER
+            background = rounded(0x38FFFFFF, dp(15).toFloat())
+            setPadding(dp(12), dp(7), dp(12), dp(7))
+            pressable { showCommandDialog() }
+            setOnLongClickListener {
+                chooseAccent()
+                true
+            }
+        }
+        captionIcon = Glyph(context, Glyph.Kind.MIC, Color.WHITE, 1.8f)
+        pill.addView(captionIcon, LayoutParams(dp(15), dp(15)).apply { rightMargin = dp(6) })
+        caption = context.label("", 13f, Color.WHITE, IosType.medium, lines = 2).apply { gravity = Gravity.CENTER }
+        pill.addView(caption, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+        left.addView(pill, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(4)
+            bottomMargin = dp(4)
+        })
         row.addView(left, LayoutParams(0, LayoutParams.MATCH_PARENT, 0.46f))
 
-        val card = LinearLayout(context).apply {
+        // Right: Leaflet widget
+        val widget = LinearLayout(context).apply {
             orientation = VERTICAL
-            background = GradientDrawable().apply {
-                setColor(0xB3060B12.toInt())
-                cornerRadius = dp(18).toFloat()
-                setStroke(dp(1), 0x6600E5FF)
-            }
-            setPadding(dp(12), dp(8), dp(10), dp(8))
+            background = rounded(c.cell, dp(22).toFloat())
+            elevation = dp(2).toFloat()
+            setPadding(dp(14), dp(13), dp(12), dp(10))
         }
         val header = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setOnClickListener { showFullLeaflet() }
+            pressable { OrbitTasks.show(context) }
         }
-        val title = TextView(context).apply {
-            text = "▤ LEAFLET"
-            typeface = monoBold
-            textSize = 12f
-            setTextColor(cyan)
-            letterSpacing = 0.08f
-        }
-        leafletCount = TextView(context).apply {
-            typeface = monoBold
-            textSize = 10.5f
-            setTextColor(0xFF000000.toInt())
-            background = GradientDrawable().apply { setColor(cyan); cornerRadius = dp(9).toFloat() }
-            setPadding(dp(6), 0, dp(6), 0)
-        }
-        val add = TextView(context).apply {
-            text = "+"
-            typeface = monoBold
-            textSize = 20f
-            setTextColor(cyan)
-            setPadding(dp(10), 0, dp(2), 0)
-            contentDescription = "Add reminder"
-            setOnClickListener { showAddDialog() }
-        }
-        header.addView(title, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
-        header.addView(leafletCount, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-        header.addView(add, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-        card.addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        card.addView(View(context).apply { setBackgroundColor(0x3300E5FF) }, LayoutParams(LayoutParams.MATCH_PARENT, dp(1)).apply {
-            topMargin = dp(4)
-            bottomMargin = dp(2)
-        })
+        val badge = FrameLayout(context).apply { background = rounded(c.orange, dp(13).toFloat()) }
+        badge.addView(Glyph(context, Glyph.Kind.LIST, Color.WHITE, 2f), FrameLayout.LayoutParams(dp(16), dp(16), Gravity.CENTER))
+        header.addView(badge, LayoutParams(dp(26), dp(26)))
+        header.addView(context.label("Leaflet", 15f, c.orange, IosType.semibold).apply { setPadding(dp(8), 0, 0, 0) },
+            LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
+        leafletCount = context.label("", 24f, c.label, IosType.bold)
+        header.addView(leafletCount)
+        widget.addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         leafletItems = LinearLayout(context).apply { orientation = VERTICAL }
-        card.addView(leafletItems, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
-        row.addView(card, LayoutParams(0, LayoutParams.MATCH_PARENT, 0.54f).apply {
-            leftMargin = dp(8)
-            topMargin = dp(6)
-            bottomMargin = dp(4)
+        widget.addView(leafletItems, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(6) })
+        row.addView(widget, LayoutParams(0, LayoutParams.MATCH_PARENT, 0.54f).apply {
+            leftMargin = dp(10)
+            topMargin = dp(10)
+            bottomMargin = dp(6)
         })
         addView(row, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(2) })
 
         leafletItems.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
             if (bottom - top != oldBottom - oldTop) {
-                val cap = maxOf(1, (bottom - top) / dp(29))
+                val cap = maxOf(1, (bottom - top) / dp(44))
                 if (cap != leafletCapacity) {
                     leafletCapacity = cap
                     ui.post { refreshLeaflet() }
@@ -207,12 +164,11 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         OrbitAssistant.loadApps(context) { }
         ReminderAlarms.rescheduleAll(context)
         initTts()
-        status.text = idleHint()
-        updateGreeting(animate = true)
+        setCaption(idleHint(), mic = true)
+        updateGreeting()
         refreshSubline()
         refreshLeaflet()
         ui.postDelayed(minuteTick, msToNextMinute())
-        ui.postDelayed(blinker, 530)
         ui.postDelayed({ if (attached && hasWindowFocus()) onHomeShown() }, 800)
     }
 
@@ -237,7 +193,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
 
     /** Runs whenever you come back to the home screen. Greets once per morning, afternoon and evening. */
     private fun onHomeShown() {
-        updateGreeting(animate = true)
+        updateGreeting()
         refreshSubline()
         refreshLeaflet()
         val name = OrbitProfile.name(context)
@@ -262,160 +218,117 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         override fun run() {
             if (!attached) return
             refreshSubline()
-            updateGreeting(animate = true)
+            updateGreeting()
             refreshLeaflet()
             ui.postDelayed(this, msToNextMinute())
         }
     }
 
-    private val typer = object : Runnable {
-        override fun run() {
-            if (typed < greetingTarget.length) typed++
-            renderGreeting()
-            if (typed < greetingTarget.length) ui.postDelayed(this, 45)
-        }
-    }
-
-    private val blinker = object : Runnable {
-        override fun run() {
-            if (!attached) return
-            cursorOn = !cursorOn
-            renderGreeting()
-            ui.postDelayed(this, 530)
-        }
-    }
-
     private fun msToNextMinute(): Long = 60_000L - (System.currentTimeMillis() % 60_000L) + 50L
 
-    // ---------------- Greeting, clock line, leaflet ----------------
+    // ---------------- Greeting, date line, Leaflet ----------------
 
-    private fun currentGreeting(): String {
+    private fun updateGreeting() {
         val name = OrbitProfile.name(context)
-        return if (name.isBlank()) "HELLO, HUMAN" else OrbitBrain.greeting(LocalDateTime.now().hour, name).uppercase(Locale.UK)
-    }
-
-    private fun updateGreeting(animate: Boolean) {
-        val g = currentGreeting()
-        if (g == greetingTarget) return
-        greetingTarget = g
-        typed = if (animate) 0 else g.length
-        ui.removeCallbacks(typer)
-        ui.post(typer)
-    }
-
-    private fun renderGreeting() {
-        val sb = SpannableStringBuilder(greetingTarget.take(typed))
-        val start = sb.length
-        sb.append(if (cursorOn || typed < greetingTarget.length) "_" else " ")
-        sb.setSpan(ForegroundColorSpan(green), start, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        greetingView.text = sb
+        val g = if (name.isBlank()) OrbitBrain.greeting(LocalDateTime.now().hour, "") else OrbitBrain.greeting(LocalDateTime.now().hour, name)
+        if (g == shownGreeting) return
+        val first = shownGreeting.isEmpty()
+        shownGreeting = g
+        if (first) {
+            greetingView.text = g
+            greetingView.alpha = 0f
+            greetingView.translationY = dp(6).toFloat()
+            greetingView.animate().alpha(1f).translationY(0f).setDuration(420).start()
+        } else {
+            greetingView.animate().alpha(0f).setDuration(160).withEndAction {
+                greetingView.text = g
+                greetingView.animate().alpha(1f).setDuration(260).start()
+            }.start()
+        }
     }
 
     private fun refreshSubline() {
         val now = LocalDateTime.now()
         val today = ReminderStore.all(context).count { !it.done && it.local()?.toLocalDate() == now.toLocalDate() }
-        val date = now.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.UK)).uppercase(Locale.UK)
-        val clock = ReminderText.clock(context, now).uppercase(Locale.UK)
-        subline.text = "$clock · $date" + if (today > 0) " · $today TODAY" else ""
+        val date = now.format(DateTimeFormatter.ofPattern("EEE d MMM", Locale.UK))
+        val clock = ReminderText.clock(context, now)
+        subline.text = "$clock · $date" + when (today) {
+            0 -> ""
+            1 -> " · 1 task today"
+            else -> " · $today tasks today"
+        }
     }
 
     private fun refreshLeaflet() {
-        val items = ReminderStore.leaflet(context)
         val now = LocalDateTime.now()
-        val open = items.count { !it.done }
-        leafletCount.text = open.toString()
-        leafletCount.visibility = if (open > 0) View.VISIBLE else View.GONE
+        val open = ReminderStore.leaflet(context).filter { !it.done }
+        leafletCount.text = if (open.isEmpty()) "" else open.size.toString()
         leafletItems.removeAllViews()
-        if (items.isEmpty()) {
-            leafletItems.addView(TextView(context).apply {
-                text = "Nothing planned.\nTap the avatar and say\n“remind me to…”"
-                typeface = mono
-                textSize = 10.5f
-                setTextColor(faint)
-                setPadding(0, dp(6), 0, 0)
+        if (open.isEmpty()) {
+            val empty = LinearLayout(context).apply {
+                orientation = VERTICAL
+                gravity = Gravity.CENTER
+                pressable { OrbitTasks.show(context) }
+            }
+            empty.addView(context.label("All clear", 15f, c.label, IosType.semibold).apply { gravity = Gravity.CENTER })
+            empty.addView(context.label("Tap the avatar and say “Remind me to…”", 12f, c.secondary, lines = 3).apply {
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(4), dp(4), 0)
             })
+            leafletItems.addView(empty, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
             return
         }
-        val shown = if (items.size > leafletCapacity) items.take(maxOf(1, leafletCapacity - 1)) else items
-        for (r in shown) leafletItems.addView(row(r, now, full = false) { })
-        if (items.size > shown.size) {
-            leafletItems.addView(TextView(context).apply {
-                text = "+${items.size - shown.size} more ›"
-                typeface = monoBold
-                textSize = 11f
-                setTextColor(cyan)
-                setPadding(0, dp(4), 0, 0)
-                setOnClickListener { showFullLeaflet() }
+        val shown = if (open.size > leafletCapacity) open.take(maxOf(1, leafletCapacity - 1)) else open
+        for (r in shown) leafletItems.addView(leafletRow(r, now))
+        if (open.size > shown.size) {
+            leafletItems.addView(context.label("${open.size - shown.size} more", 12f, c.secondary, IosType.medium).apply {
+                setPadding(dp(30), dp(4), 0, 0)
+                pressable { OrbitTasks.show(context) }
             })
         }
     }
 
-    private fun row(r: Reminder, now: LocalDateTime, full: Boolean, onChange: () -> Unit): View {
+    private fun leafletRow(r: Reminder, now: LocalDateTime): View {
         val t = r.local()
-        val overdue = !r.done && t != null && t.isBefore(now) && r.repeat == ReminderRepeat.NONE
-        val label = when {
-            t == null -> "NOTE"
-            overdue -> "DUE"
-            else -> ReminderText.label(context, t, now).uppercase(Locale.UK)
-        }
+        val overdue = t != null && t.isBefore(now) && r.repeat == ReminderRepeat.NONE
         val line = LinearLayout(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(if (full) 8 else 5), 0, dp(if (full) 8 else 5))
+            setPadding(0, dp(4), 0, dp(4))
+            pressable { OrbitTasks.edit(context, r) }
         }
-        val timeView = TextView(context).apply {
-            text = label
-            typeface = monoBold
-            textSize = if (full) 11.5f else 10.5f
-            setTextColor(
-                when {
-                    r.done -> 0x66FFFFFF
-                    overdue -> amber
-                    t == null -> faint
-                    else -> cyan
-                }
-            )
-            maxLines = 1
+        val check = CheckCircle(context, c).apply {
+            accent = c.orange
+            setOnClickListener {
+                checked = true
+                pop()
+                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                ui.postDelayed({ ReminderStore.setDone(context, r.id, true) }, 350)
+            }
         }
-        val body = TextView(context).apply {
-            text = (if (r.repeat != ReminderRepeat.NONE) "↻ " else "") + r.text
-            textSize = if (full) 15f else 13f
-            setTextColor(if (r.done) 0x66FFFFFF else white)
-            maxLines = if (full) 3 else 1
-            ellipsize = TextUtils.TruncateAt.END
-            if (r.done) paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+        line.addView(check, LayoutParams(dp(20), dp(20)))
+        val texts = LinearLayout(context).apply {
+            orientation = VERTICAL
+            setPadding(dp(10), 0, 0, 0)
         }
-        line.addView(timeView, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
-        line.addView(body, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
-        val toggle = {
-            line.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-            ReminderStore.setDone(context, r.id, !r.done)
-            status.text = if (r.done) "> back on the leaflet: ${r.text}" else "> ticked off: ${r.text}"
-            onChange()
+        texts.addView(context.label(r.text, 14f, c.label))
+        val sub = when {
+            t == null -> null
+            overdue -> "Overdue"
+            r.repeat == ReminderRepeat.DAILY -> ReminderText.clock(context, t) + " · Daily"
+            r.repeat == ReminderRepeat.WEEKDAYS -> ReminderText.clock(context, t) + " · Weekdays"
+            r.repeat == ReminderRepeat.WEEKLY -> ReminderText.label(context, t, now) + " · Weekly"
+            r.repeat == ReminderRepeat.MONTHLY -> ReminderText.label(context, t, now) + " · Monthly"
+            else -> ReminderText.label(context, t, now)
         }
-        if (full) {
-            line.addView(button(if (r.done) "↺" else "✓") { toggle() })
-            line.addView(button("✕") {
-                ReminderStore.delete(context, r.id)
-                onChange()
-            })
-        } else {
-            line.setOnClickListener { toggle() }
-        }
+        if (sub != null) texts.addView(context.label(sub, 12f, if (overdue) c.red else c.secondary).apply { setPadding(0, dp(2), 0, 0) })
+        line.addView(texts, LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f))
         return line
     }
 
-    private fun button(label: String, onClick: () -> Unit) = TextView(context).apply {
-        text = label
-        textSize = 18f
-        setTextColor(cyan)
-        gravity = Gravity.CENTER
-        minWidth = dp(40)
-        setPadding(dp(8), dp(4), dp(8), dp(4))
-        setOnClickListener { onClick() }
-    }
-
     private fun greetingSummary(name: String, now: LocalDateTime): String {
+        // Mornings get a full briefing of the day
+        if (OrbitBrain.partOfDay(now.hour) == "morning") return OrbitBrain.greeting(now.hour, name) + ". " + dayBody(0, now, "")
         val sb = StringBuilder(OrbitBrain.greeting(now.hour, name)).append('.')
         val open = ReminderStore.all(context).filter { !it.done && it.time != null }
         val today = open.filter { it.local()?.toLocalDate() == now.toLocalDate() }
@@ -424,7 +337,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         when {
             today.isEmpty() && next == null -> sb.append(" Your schedule is clear.")
             today.isEmpty() -> sb.append(" Nothing else today.")
-            else -> sb.append(" You have ${today.size} reminder${if (today.size == 1) "" else "s"} today.")
+            else -> sb.append(" You have ${today.size} task${if (today.size == 1) "" else "s"} today.")
         }
         if (due > 0) sb.append(" $due ${if (due == 1) "is" else "are"} overdue.")
         if (next != null) next.local()?.let { sb.append(" Next: ${lowerFirst(next.text)}, ${ReminderText.spoken(it, now)}.") }
@@ -443,10 +356,110 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             }
         }
         val more = if (open.size > 3) " And ${open.size - 3} more on your leaflet." else ""
-        return "You have ${open.size} reminder${if (open.size == 1) "" else "s"}$who. " + parts.joinToString(". ") + "." + more
+        return "You have ${open.size} task${if (open.size == 1) "" else "s"}$who. " + parts.joinToString(". ") + "." + more
     }
 
-    private fun idleHint() = "> tap me to talk\n> tap here to type"
+    // ---------------- Spoken summaries ----------------
+
+    private fun openTasks(): List<Reminder> = ReminderStore.all(context).filter { !it.done }
+
+    /** "in 20 minutes", "in about 2 hours", or "" when it's further away. */
+    private fun spokenIn(t: LocalDateTime, now: LocalDateTime): String {
+        val mins = java.time.temporal.ChronoUnit.MINUTES.between(now, t)
+        return when {
+            mins <= 1 -> "in a minute"
+            mins < 60 -> "in $mins minutes"
+            mins < 12 * 60 -> {
+                val h = mins / 60
+                val half = mins % 60 >= 30
+                "in about " + if (h == 1L && !half) "an hour" else if (half) "$h and a half hours" else "$h hours"
+            }
+            else -> ""
+        }
+    }
+
+    /** The day in a few sentences: what's left, what's overdue, what's done. */
+    private fun dayBody(daysAhead: Int, now: LocalDateTime, who: String): String {
+        val day = now.toLocalDate().plusDays(daysAhead.toLong())
+        val all = ReminderStore.all(context)
+        val items = all.filter { !it.done && it.local()?.toLocalDate() == day }.sortedBy { it.time ?: 0L }
+        val notes = all.count { !it.done && it.time == null }
+        fun list(xs: List<Reminder>) = xs.take(4).joinToString(" ") { r ->
+            "At ${ReminderText.spokenClock(r.local()!!)}, ${lowerFirst(r.text)}."
+        } + if (xs.size > 4) " And ${xs.size - 4} more." else ""
+        if (daysAhead > 0) {
+            if (items.isEmpty()) return "Tomorrow is clear$who. Nothing scheduled yet."
+            return "Tomorrow you have ${items.size} task${if (items.size == 1) "" else "s"}. " + list(items)
+        }
+        val upcoming = items.filter { it.local()?.isAfter(now) == true }
+        val overdue = all.filter { !it.done && it.repeat == ReminderRepeat.NONE && it.local()?.isBefore(now) == true }
+        val doneToday = all.count { it.done && it.local()?.toLocalDate() == day }
+        val sb = StringBuilder()
+        if (upcoming.isEmpty() && overdue.isEmpty()) {
+            sb.append("Your day is clear$who.")
+            if (doneToday > 0) sb.append(" You've finished $doneToday task${if (doneToday == 1) "" else "s"} today.")
+            all.filter { !it.done && it.local()?.toLocalDate() == day.plusDays(1) }.minByOrNull { it.time ?: Long.MAX_VALUE }?.let {
+                sb.append(" Tomorrow starts with ${lowerFirst(it.text)}, at ${ReminderText.spokenClock(it.local()!!)}.")
+            }
+        } else {
+            if (upcoming.isNotEmpty()) sb.append("You have ${upcoming.size} task${if (upcoming.size == 1) "" else "s"} still to do today. ").append(list(upcoming))
+            if (overdue.isNotEmpty()) {
+                sb.append(" Overdue: ").append(overdue.take(2).joinToString(" and ") { lowerFirst(it.text) })
+                if (overdue.size > 2) sb.append(", and ${overdue.size - 2} more")
+                sb.append('.')
+            }
+            if (doneToday > 0) sb.append(" You've already done $doneToday.")
+        }
+        if (notes > 0) sb.append(" Plus $notes note${if (notes == 1) "" else "s"} on your leaflet.")
+        return sb.toString().trim()
+    }
+
+    private fun whatsNext(now: LocalDateTime, who: String): String {
+        val upcoming = openTasks().filter { it.local()?.isAfter(now) == true }.sortedBy { it.time ?: 0L }
+        if (upcoming.isEmpty()) {
+            val overdue = openTasks().filter { it.repeat == ReminderRepeat.NONE && it.local()?.isBefore(now) == true }
+            return if (overdue.isEmpty()) "Nothing else is scheduled$who. You're all clear."
+            else "Nothing else is scheduled$who, but ${lowerFirst(overdue.first().text)} is still overdue."
+        }
+        val first = upcoming[0]
+        val t = first.local()!!
+        val soon = spokenIn(t, now)
+        val sb = StringBuilder("Next up: ${lowerFirst(first.text)}, ${ReminderText.spoken(t, now)}")
+        if (soon.isNotEmpty()) sb.append(", $soon")
+        sb.append('.')
+        upcoming.getOrNull(1)?.let { sb.append(" After that: ${lowerFirst(it.text)}, ${ReminderText.spoken(it.local()!!, now)}.") }
+        return sb.toString()
+    }
+
+    private fun whatsDue(now: LocalDateTime, who: String): String {
+        val open = openTasks()
+        val overdue = open.filter { it.repeat == ReminderRepeat.NONE && it.local()?.isBefore(now) == true }.sortedBy { it.time ?: 0L }
+        val soon = open.filter { val t = it.local(); t != null && t.isAfter(now) && t.isBefore(now.plusMinutes(60)) }.sortedBy { it.time ?: 0L }
+        if (overdue.isEmpty() && soon.isEmpty()) return "Nothing is due$who. " + whatsNext(now, "")
+        val sb = StringBuilder()
+        if (overdue.isNotEmpty()) {
+            sb.append("You have ${overdue.size} overdue task${if (overdue.size == 1) "" else "s"}: ")
+            sb.append(overdue.take(3).joinToString("; ") { r ->
+                val t = r.local()!!
+                val from = if (t.toLocalDate() == now.toLocalDate()) "from ${ReminderText.spokenClock(t)}"
+                else if (t.toLocalDate() == now.toLocalDate().minusDays(1)) "from yesterday"
+                else "from " + t.format(DateTimeFormatter.ofPattern("EEEE", Locale.UK))
+                "${lowerFirst(r.text)}, $from"
+            })
+            sb.append('.')
+        }
+        if (soon.isNotEmpty()) {
+            sb.append(" Due soon: ").append(soon.take(2).joinToString(" and ") { "${lowerFirst(it.text)}, ${spokenIn(it.local()!!, now)}" }).append('.')
+        }
+        return sb.toString().trim()
+    }
+
+    private fun idleHint() = "Tap to talk"
+
+    private fun setCaption(text: String, mic: Boolean = false) {
+        caption.text = text
+        captionIcon.visibility = if (mic) View.VISIBLE else View.GONE
+    }
 
     // ---------------- Talking ----------------
 
@@ -465,27 +478,34 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
 
     private fun startListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            status.text = "< Voice isn't available on this phone. Type instead."
+            setCaption("Voice isn't available. Tap here to type.")
             showCommandDialog()
             return
         }
         if (!has(Manifest.permission.RECORD_AUDIO)) {
             ask(Manifest.permission.RECORD_AUDIO)
-            status.text = "< Allow the microphone, then tap me again."
+            setCaption("Allow the microphone, then tap again")
             return
         }
         val rec = recogniser ?: SpeechRecognizer.createSpeechRecognizer(context).also {
             it.setRecognitionListener(voiceListener)
             recogniser = it
         }
+        val lang = OrbitProfile.speechLocale(context)
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+            if (lang.isNotEmpty()) {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+            }
+            // Hints so app names and Orbit's commands are heard correctly (supported by newer recognisers)
+            if (Build.VERSION.SDK_INT >= 33) putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, hintWords())
         }
         listening = true
         avatar.mode = OrbitAvatarView.Mode.LISTENING
-        status.text = "> listening…"
+        setCaption("Listening…")
         avatar.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         rec.startListening(intent)
     }
@@ -507,7 +527,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         override fun onPartialResults(partialResults: Bundle?) {
             if (!attached) return
             partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.let {
-                if (it.isNotBlank()) status.text = "> $it"
+                if (it.isNotBlank()) setCaption("“$it”")
             }
         }
 
@@ -518,7 +538,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().filter { it.isNotBlank() }
             if (heard.isEmpty()) {
                 avatar.mode = OrbitAvatarView.Mode.IDLE
-                status.text = "< I didn't catch that. Tap me and try again."
+                setCaption("I didn't catch that", mic = true)
                 return
             }
             handle(bestGuess(heard))
@@ -529,12 +549,28 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             avatar.level = 0f
             if (!attached) return
             avatar.mode = OrbitAvatarView.Mode.IDLE
-            status.text = when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "< I didn't catch that. Tap me and try again."
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "< Voice needs data or an offline speech pack. Tap here to type."
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "< Allow the microphone, then tap me again."
-                else -> "< Voice stopped (code $error). Tap here to type."
+            if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
+                // This phone can't do the chosen accent: step down to UK English, then the phone default
+                val next = when (OrbitProfile.speechLocale(context)) {
+                    "" -> null
+                    "en-GB", "en-US" -> ""
+                    else -> "en-GB"
+                }
+                if (next != null) {
+                    OrbitProfile.setSpeechLocale(context, next)
+                    setCaption("Switched to ${accentName(next)}. Tap to talk.", mic = true)
+                    return
+                }
             }
+            setCaption(
+                when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "I didn't catch that"
+                    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Voice needs data. Tap here to type."
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Allow the microphone, then tap again"
+                    else -> "Voice stopped. Tap here to type."
+                },
+                mic = error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+            )
         }
     }
 
@@ -542,39 +578,88 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
     private fun bestGuess(heard: List<String>): String {
         val now = LocalDateTime.now()
         val apps = OrbitAssistant.cachedApps()
-        return heard.firstOrNull { h ->
+        val fixed = heard.map { OrbitBrain.fixHeard(it) }.filter { it.isNotBlank() }
+        if (fixed.isEmpty()) return heard.first()
+        return fixed.firstOrNull { h ->
             when (val i = OrbitBrain.interpret(h, now)) {
                 is HeroIntent.Other -> apps.isEmpty() || OrbitAssistant.parse(i.raw, apps, context) !is OrbitCommand.NotFound
                 else -> true
             }
-        } ?: heard.first()
+        } ?: fixed.first()
+    }
+
+    private fun hintWords(): ArrayList<String> {
+        val words = ArrayList<String>()
+        words.addAll(OrbitAssistant.cachedApps().map { it.label }.distinct().take(60))
+        words.addAll(listOf(
+            "remind me", "every day", "every weekday", "every month", "tomorrow", "tonight",
+            "what's next", "what's due", "what does my day look like", "open", "call", "play"
+        ))
+        OrbitProfile.name(context).takeIf { it.isNotBlank() }?.let { words.add(it) }
+        return words
+    }
+
+    private val accents = listOf(
+        "en-ZA" to "English (South Africa) · closest to Zimbabwe",
+        "en-KE" to "English (Kenya)",
+        "en-NG" to "English (Nigeria)",
+        "en-GB" to "English (UK)",
+        "en-US" to "English (US)",
+        "" to "Phone default"
+    )
+
+    private fun accentName(tag: String) = accents.firstOrNull { it.first == tag }?.second?.substringBefore(" ·") ?: "phone default"
+
+    /** Lets you pick which English the speech recogniser listens for. Hold the "Tap to talk" pill, or say "change accent". */
+    private fun chooseAccent() {
+        val act = context.findActivity() ?: return
+        val current = accents.indexOfFirst { it.first == OrbitProfile.speechLocale(context) }.coerceAtLeast(0)
+        AlertDialog.Builder(act, dialogTheme)
+            .setTitle("Voice Accent")
+            .setSingleChoiceItems(accents.map { it.second }.toTypedArray(), current) { d, which ->
+                OrbitProfile.setSpeechLocale(context, accents[which].first)
+                d.dismiss()
+                setCaption("Listening for ${accentName(accents[which].first)}", mic = true)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun handle(raw: String) {
         val now = LocalDateTime.now()
         val name = OrbitProfile.name(context)
         val who = if (name.isBlank()) "" else ", $name"
-        status.text = "> $raw"
+        setCaption("“$raw”")
         avatar.mode = OrbitAvatarView.Mode.THINKING
         ui.postDelayed({ if (avatar.mode == OrbitAvatarView.Mode.THINKING) avatar.mode = OrbitAvatarView.Mode.IDLE }, 3000)
         when (val intent = OrbitBrain.interpret(raw, now)) {
             is HeroIntent.SetName -> {
                 OrbitProfile.setName(context, intent.name)
                 OrbitProfile.setLastGreeting(context, periodKey(now))
-                updateGreeting(animate = true)
+                updateGreeting()
                 say("Got it. I'll call you ${intent.name}.")
             }
             is HeroIntent.AddReminder -> addReminder(intent.reminder)
-            HeroIntent.ListReminders -> say(scheduleSummary(now, who))
+            HeroIntent.ListReminders -> {
+                say(scheduleSummary(now, who))
+                OrbitTasks.show(context)
+            }
+            is HeroIntent.DayBrief -> {
+                say((if (intent.daysAhead == 0) "Here's your day$who. " else "") + dayBody(intent.daysAhead, now, who))
+                OrbitTasks.show(context)
+            }
+            HeroIntent.WhatsNext -> say(whatsNext(now, who))
+            HeroIntent.WhatsDue -> say(whatsDue(now, who))
+            HeroIntent.VoiceSettings -> chooseAccent()
             HeroIntent.ClearDone -> {
                 val n = ReminderStore.clearDone(context)
-                say(if (n == 0) "There's nothing ticked off to clear$who." else "Cleared $n ticked reminder${if (n == 1) "" else "s"}.")
+                say(if (n == 0) "There's nothing ticked off to clear$who." else "Cleared $n completed task${if (n == 1) "" else "s"}.")
             }
             HeroIntent.TellTime -> say("It's ${ReminderText.spokenClock(now)}$who.")
             HeroIntent.TellDate -> say("Today is " + now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.UK)) + ".")
             HeroIntent.Hello -> say("Hello$who. What can I do for you?")
             HeroIntent.Thanks -> say("Any time$who.")
-            HeroIntent.Help -> say("Try: open YouTube. Call Mum. Remind me to pay the rent on Friday at 9. Or ask: what's on my schedule?")
+            HeroIntent.Help -> say("Try: open YouTube. Call Mum. Remind me every weekday at 8 to check the stock. Or ask: what's next, what's due, or what does my day look like?")
             is HeroIntent.Voice -> {
                 if (intent.on) {
                     OrbitProfile.setVoiceOn(context, true)
@@ -582,13 +667,13 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                 } else {
                     OrbitProfile.setVoiceOn(context, false)
                     tts?.stop()
-                    say("Okay$who, I'll stay quiet. Say \"voice on\" when you want me back.")
+                    say("Okay$who, I'll stay quiet. Say “voice on” to hear me again.")
                 }
             }
             is HeroIntent.Other -> runAppCommand(intent.raw, who)
             HeroIntent.Empty -> {
                 avatar.mode = OrbitAvatarView.Mode.IDLE
-                status.text = idleHint()
+                setCaption(idleHint(), mic = true)
             }
         }
     }
@@ -597,7 +682,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         val who = OrbitProfile.name(context).let { if (it.isBlank()) "" else ", $it" }
         if (p.time == null && p.text == "Reminder") {
             say("What should I remind you about$who?")
-            showAddDialog()
+            OrbitTasks.edit(context, null)
             return
         }
         ReminderStore.add(context, p)
@@ -608,9 +693,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         val time = p.time
         val whenText = when {
             time == null -> null
-            p.repeat == ReminderRepeat.DAILY -> "every day at " + ReminderText.spokenClock(time)
-            p.repeat == ReminderRepeat.WEEKLY ->
-                "every " + time.format(DateTimeFormatter.ofPattern("EEEE", Locale.UK)) + " at " + ReminderText.spokenClock(time)
+            p.repeat != ReminderRepeat.NONE -> OrbitBrain.repeatPhrase(p.repeat, time) + " at " + ReminderText.spokenClock(time)
             else -> ReminderText.spoken(time, now)
         }
         say(
@@ -636,13 +719,13 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                     dial(null)
                 }
                 is OrbitCommand.ShowGroup -> {
-                    say("Here are all your apps, sorted into groups.")
+                    say("Here are your apps, sorted into groups.")
                     OrbitAssistant.show(context)
                 }
                 is OrbitCommand.NotFound -> say("Sorry$who, I couldn't find ${cmd.query}.")
                 OrbitCommand.Empty -> {
                     avatar.mode = OrbitAvatarView.Mode.IDLE
-                    status.text = idleHint()
+                    setCaption(idleHint(), mic = true)
                 }
             }
         }
@@ -686,7 +769,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         try {
             context.startActivity(intent)
         } catch (e: Exception) {
-            status.text = "< No phone app found."
+            setCaption("No phone app found")
         }
     }
 
@@ -700,8 +783,8 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                 if (result != TextToSpeech.SUCCESS) return@post
                 val lang = engine.setLanguage(Locale.UK)
                 if (lang == TextToSpeech.LANG_MISSING_DATA || lang == TextToSpeech.LANG_NOT_SUPPORTED) engine.setLanguage(Locale.getDefault())
-                engine.setPitch(0.9f)
-                engine.setSpeechRate(1.02f)
+                engine.setPitch(0.95f)
+                engine.setSpeechRate(1.0f)
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
                         ui.post { if (!listening) avatar.mode = OrbitAvatarView.Mode.SPEAKING }
@@ -727,7 +810,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
 
     /** Shows the reply under the avatar and speaks it (unless voice is off). */
     private fun say(text: String) {
-        status.text = "< $text"
+        setCaption(text)
         if (!OrbitProfile.voiceOn(context)) {
             if (!listening) avatar.mode = OrbitAvatarView.Mode.IDLE
             return
@@ -743,22 +826,21 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
     // ---------------- Dialogs ----------------
 
     private fun askName(first: Boolean) {
-        val act = activity() ?: return
+        val act = context.findActivity() ?: return
         val field = field("Your name", OrbitProfile.name(context)).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS or InputType.TYPE_TEXT_VARIATION_PERSON_NAME
         }
         if (first) say("Hello! I'm Orbit, your assistant. What should I call you?")
         val d = AlertDialog.Builder(act, dialogTheme)
-            .setTitle(if (first) "Hi, I'm Orbit" else "Your name")
+            .setTitle(if (first) "Hi, I'm Orbit" else "Your Name")
             .setMessage("What should I call you?")
             .setView(padded(field))
             .setPositiveButton("Save") { _, _ ->
                 val n = OrbitBrain.cleanName(field.text.toString())
                 if (n.isNotEmpty()) {
-                    val now = LocalDateTime.now()
                     OrbitProfile.setName(context, n)
-                    OrbitProfile.setLastGreeting(context, periodKey(now))
-                    updateGreeting(animate = true)
+                    OrbitProfile.setLastGreeting(context, periodKey(LocalDateTime.now()))
+                    updateGreeting()
                     say(
                         if (first) "Nice to meet you, $n. Tap me any time and tell me what to open, or what to remind you about."
                         else "Got it. I'll call you $n."
@@ -772,30 +854,9 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         field.requestFocus()
     }
 
-    private fun showAddDialog() {
-        val act = activity() ?: return
-        val field = field("e.g. Call Mum tomorrow at 5pm")
-        val d = AlertDialog.Builder(act, dialogTheme)
-            .setTitle("New reminder")
-            .setMessage("Type it the way you'd say it. Leave out the time for a simple note.")
-            .setView(padded(field))
-            .setPositiveButton("Add") { _, _ ->
-                val t = field.text.toString().trim()
-                if (t.isNotEmpty()) {
-                    val phrase = if (t.startsWith("remind", ignoreCase = true)) t else "remind me to $t"
-                    addReminder(OrbitBrain.parseReminder(phrase, LocalDateTime.now()))
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .create()
-        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
-        d.show()
-        field.requestFocus()
-    }
-
     private fun showCommandDialog() {
-        val act = activity() ?: return
-        val field = field("e.g. open YouTube, remind me to…")
+        val act = context.findActivity() ?: return
+        val field = field("Open YouTube, remind me to…")
         val d = AlertDialog.Builder(act, dialogTheme)
             .setTitle("Ask Orbit")
             .setView(padded(field))
@@ -808,49 +869,6 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
         d.show()
         field.requestFocus()
-    }
-
-    private fun showFullLeaflet() {
-        val act = activity() ?: return
-        val list = LinearLayout(context).apply {
-            orientation = VERTICAL
-            setPadding(dp(20), dp(4), dp(12), dp(4))
-        }
-        val scroll = ScrollView(context).apply { addView(list) }
-        fun fill() {
-            list.removeAllViews()
-            val items = ReminderStore.leaflet(context)
-            val now = LocalDateTime.now()
-            if (items.isEmpty()) {
-                list.addView(TextView(context).apply {
-                    text = "Nothing on your leaflet yet."
-                    setTextColor(faint)
-                    textSize = 15f
-                    setPadding(0, dp(12), 0, dp(12))
-                })
-            }
-            for (r in items) list.addView(row(r, now, full = true) { ui.post { fill() } })
-        }
-        fill()
-        val name = OrbitProfile.name(context)
-        val d = AlertDialog.Builder(act, dialogTheme)
-            .setTitle(if (name.isBlank()) "Leaflet" else "$name's leaflet")
-            .setView(scroll)
-            .setPositiveButton("Add", null)
-            .setNeutralButton("Clear ticked", null)
-            .setNegativeButton("Close", null)
-            .create()
-        d.setOnShowListener {
-            d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                d.dismiss()
-                showAddDialog()
-            }
-            d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                ReminderStore.clearDone(context)
-                fill()
-            }
-        }
-        d.show()
     }
 
     // ---------------- Helpers ----------------
@@ -875,28 +893,20 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                 Intent.makeMainSelectorActivity(Intent.ACTION_MAIN, Intent.CATEGORY_APP_CALENDAR).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         } catch (e: Exception) {
-            status.text = "< No calendar app found."
+            setCaption("No calendar app found")
         }
-    }
-
-    private fun activity(): Activity? {
-        var c: Context? = context
-        while (c is ContextWrapper && c !is Activity) c = c.baseContext
-        return (c as? Activity)?.takeIf { !it.isFinishing }
     }
 
     private fun has(permission: String) =
         Build.VERSION.SDK_INT < 23 || context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     private fun ask(permission: String) {
-        if (Build.VERSION.SDK_INT >= 23) activity()?.requestPermissions(arrayOf(permission), 7302)
+        if (Build.VERSION.SDK_INT >= 23) context.findActivity()?.requestPermissions(arrayOf(permission), 7302)
     }
 
     /** "Call Mum" -> "call Mum", but keeps "ZESA bill" as is. */
     private fun lowerFirst(s: String): String =
         if (s.length > 1 && s[1].isUpperCase()) s else s.replaceFirstChar { it.lowercase(Locale.UK) }
-
-    private fun shadow(v: TextView) = v.setShadowLayer(6f, 0f, 1f, 0xCC000000.toInt())
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 }
