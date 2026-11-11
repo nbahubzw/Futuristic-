@@ -14,6 +14,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        // Orbit's offline brain ships native code; this phone is 64-bit ARM, so only that is packed
+        ndk { abiFilters += "arm64-v8a" }
     }
     // One fixed key, so each new build installs over the old one (keeps your tasks and Orbit's permissions)
     signingConfigs {
@@ -33,6 +35,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
 }
 
 dependencies {
@@ -43,4 +46,6 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    // On-device language model for Orbit's offline brain
+    implementation("com.google.mediapipe:tasks-genai:0.10.27")
 }
