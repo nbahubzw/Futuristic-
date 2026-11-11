@@ -142,6 +142,13 @@ class OrbitTasksDialog(private val activity: Activity) : Dialog(activity, androi
             pressable { dismiss() }
         }
         bar.addView(done, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL))
+        val gear = FrameLayout(context).apply {
+            setPadding(context.dp(18), context.dp(11), context.dp(18), context.dp(11))
+            addView(Glyph(context, Glyph.Kind.GEAR, Color.WHITE, 1.7f), FrameLayout.LayoutParams(context.dp(24), context.dp(24)))
+            contentDescription = "Settings"
+            pressable { OrbitSettings.show(context) }
+        }
+        bar.addView(gear, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.START or Gravity.CENTER_VERTICAL))
         panel.addView(bar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, context.dp(48)))
 
         // Content

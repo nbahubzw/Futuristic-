@@ -21,6 +21,7 @@ sealed class HeroIntent {
     object WhatsNext : HeroIntent()
     object WhatsDue : HeroIntent()
     object VoiceSettings : HeroIntent()
+    object Settings : HeroIntent()
     object ClearDone : HeroIntent()
     object TellTime : HeroIntent()
     object TellDate : HeroIntent()
@@ -65,6 +66,12 @@ object OrbitBrain {
     )
     private val NEXT_Q = Regex("\\bwhat'?s next\\b|\\bwhat is next\\b|\\bnext (?:task|reminder|thing|up)\\b|\\bup next\\b|\\bwhat'?s coming up\\b|\\bwhat comes next\\b", IC)
     private val DUE_Q = Regex("\\bwhat'?s due\\b|\\bwhat is due\\b|\\banything due\\b|\\b(?:what'?s |anything )?overdue\\b|\\bwhat (?:did|have) i miss(?:ed)?\\b|\\bpending\\b|\\bdue (?:now|today|soon)\\b", IC)
+    private val SETTINGS_Q = Regex(
+        "\\b(?:orbit|gestures?|navigation|nav bar|launcher|home screen) settings\\b|\\bsettings (?:for|in) orbit\\b|" +
+            "\\b(?:hide|show) (?:the )?(?:android )?(?:buttons|nav(?:igation)? (?:bar|buttons))\\b|" +
+            "\\b(?:set up|setup|turn on|switch on|enable) (?:the |my )?(?:orbit |swipe )?gestures\\b",
+        IC
+    )
     private val ACCENT_Q = Regex("\\b(?:change (?:the |my )?accent|accent|voice settings|speech settings|change (?:the )?language)\\b", IC)
 
     // Words speech recognition often mishears in a Southern African accent, fixed before anything else
@@ -102,6 +109,7 @@ object OrbitBrain {
             if (name.isNotEmpty()) return HeroIntent.SetName(name)
         }
         if (REMIND.containsMatchIn(s)) return HeroIntent.AddReminder(parseReminder(s, now))
+        if (SETTINGS_Q.containsMatchIn(text)) return HeroIntent.Settings
         if (TIME_Q.containsMatchIn(s)) return HeroIntent.TellTime
         if (DATE_Q.containsMatchIn(s)) return HeroIntent.TellDate
         if (CLEAR_Q.containsMatchIn(s)) return HeroIntent.ClearDone

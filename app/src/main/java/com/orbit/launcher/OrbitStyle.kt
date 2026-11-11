@@ -1,5 +1,6 @@
 package com.orbit.launcher
 
+import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
@@ -150,7 +151,7 @@ class CheckCircle(context: Context, private val colors: IosColors) : View(contex
 
 /** Small line icons drawn in code, in the spirit of SF Symbols. */
 class Glyph(context: Context, private val kind: Kind, var color: Int, private val strokeDp: Float = 1.8f) : View(context) {
-    enum class Kind { PLUS, CHEVRON, MIC, CALENDAR, CLOCK, REPEAT, LIST, BELL, KEYBOARD, SUN }
+    enum class Kind { PLUS, CHEVRON, MIC, CALENDAR, CLOCK, REPEAT, LIST, BELL, KEYBOARD, SUN, PERSON, SPEAKER, SWIPE, NAVBAR, BACK, BAR, WAVE, GEAR }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -233,6 +234,62 @@ class Glyph(context: Context, private val kind: Kind, var color: Int, private va
                 paint.style = Paint.Style.STROKE
                 canvas.drawLine(x(8f), y(14f), x(16f), y(14f), paint)
             }
+            Kind.PERSON -> {
+                canvas.drawCircle(x(12f), y(8.5f), 3.6f * s, paint)
+                path.moveTo(x(5f), y(20f))
+                path.cubicTo(x(5f), y(15.5f), x(8.5f), y(13.5f), x(12f), y(13.5f))
+                path.cubicTo(x(15.5f), y(13.5f), x(19f), y(15.5f), x(19f), y(20f))
+                canvas.drawPath(path, paint)
+            }
+            Kind.SPEAKER -> {
+                path.moveTo(x(4f), y(9.5f)); path.lineTo(x(8f), y(9.5f)); path.lineTo(x(12.5f), y(5.5f))
+                path.lineTo(x(12.5f), y(18.5f)); path.lineTo(x(8f), y(14.5f)); path.lineTo(x(4f), y(14.5f)); path.close()
+                canvas.drawPath(path, paint)
+                oval.set(x(11f), y(8f), x(18f), y(16f))
+                canvas.drawArc(oval, -50f, 100f, false, paint)
+            }
+            Kind.SWIPE -> {
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(x(12f), y(18f), 2.4f * s, paint)
+                paint.style = Paint.Style.STROKE
+                canvas.drawLine(x(12f), y(14f), x(12f), y(4.5f), paint)
+                path.moveTo(x(8.5f), y(8f)); path.lineTo(x(12f), y(4.5f)); path.lineTo(x(15.5f), y(8f))
+                canvas.drawPath(path, paint)
+            }
+            Kind.NAVBAR -> {
+                path.moveTo(x(8f), y(8.8f)); path.lineTo(x(3.5f), y(12f)); path.lineTo(x(8f), y(15.2f)); path.close()
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(x(12.5f), y(12f), 2.8f * s, paint)
+                oval.set(x(17f), y(9.2f), x(21f), y(14.8f))
+                canvas.drawRect(oval, paint)
+            }
+            Kind.BACK -> {
+                path.moveTo(x(14.5f), y(5.5f)); path.lineTo(x(8.5f), y(12f)); path.lineTo(x(14.5f), y(18.5f))
+                canvas.drawPath(path, paint)
+            }
+            Kind.BAR -> {
+                oval.set(x(6.5f), y(3f), x(17.5f), y(21f))
+                canvas.drawRoundRect(oval, 3f * s, 3f * s, paint)
+                paint.style = Paint.Style.FILL
+                oval.set(x(9.5f), y(16.8f), x(14.5f), y(18.4f))
+                canvas.drawRoundRect(oval, 0.8f * s, 0.8f * s, paint)
+            }
+            Kind.WAVE -> {
+                oval.set(x(8.5f), y(4f), x(15.5f), y(20f))
+                canvas.drawRoundRect(oval, 2f * s, 2f * s, paint)
+                canvas.drawLine(x(4.5f), y(8.5f), x(4.5f), y(15.5f), paint)
+                canvas.drawLine(x(19.5f), y(8.5f), x(19.5f), y(15.5f), paint)
+            }
+            Kind.GEAR -> {
+                canvas.drawCircle(x(12f), y(12f), 3f * s, paint)
+                canvas.drawCircle(x(12f), y(12f), 6.6f * s, paint)
+                for (i in 0 until 8) {
+                    val a = Math.toRadians(i * 45.0 + 22.5)
+                    val c = Math.cos(a).toFloat()
+                    val sn = Math.sin(a).toFloat()
+                    canvas.drawLine(x(12f + c * 6.6f), y(12f + sn * 6.6f), x(12f + c * 9f), y(12f + sn * 9f), paint)
+                }
+            }
             Kind.SUN -> {
                 canvas.drawCircle(x(12f), y(12f), 4f * s, paint)
                 for (i in 0 until 8) {
@@ -253,4 +310,71 @@ fun Context.iconTile(kind: Glyph.Kind, tint: Int, sizeDp: Int = 29): View {
     tile.addView(Glyph(this, kind, 0xFFFFFFFF.toInt(), 2f), android.widget.FrameLayout.LayoutParams(dp(sizeDp - 9), dp(sizeDp - 9), android.view.Gravity.CENTER))
     tile.layoutParams = android.view.ViewGroup.LayoutParams(dp(sizeDp), dp(sizeDp))
     return tile
+}
+
+/** iOS-style toggle switch. */
+class IosSwitch(context: Context, private val colors: IosColors) : View(context) {
+    var checked: Boolean = false
+        private set
+    var onChange: ((Boolean) -> Unit)? = null
+    private var pos = 0f
+    private val track = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val knob = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFFFFFFFF.toInt()
+        setShadowLayer(context.dp(2).toFloat(), 0f, context.dp(1).toFloat(), 0x40000000)
+    }
+    private val rect = RectF()
+
+    init {
+        isClickable = true
+        setOnClickListener {
+            if (isEnabled) {
+                setChecked(!checked, animate = true)
+                onChange?.invoke(checked)
+            }
+        }
+    }
+
+    fun setChecked(value: Boolean, animate: Boolean = false) {
+        checked = value
+        val target = if (value) 1f else 0f
+        if (!animate) {
+            pos = target
+            invalidate()
+            return
+        }
+        ValueAnimator.ofFloat(pos, target).apply {
+            duration = 220
+            addUpdateListener {
+                pos = it.animatedValue as Float
+                invalidate()
+            }
+        }.start()
+    }
+
+    override fun setEnabled(enabled: Boolean) {
+        super.setEnabled(enabled)
+        alpha = if (enabled) 1f else 0.4f
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(context.dp(51), context.dp(31))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val off = if (colors.dark) 0xFF39393D.toInt() else 0xFFE9E9EA.toInt()
+        track.color = blend(off, colors.green, pos)
+        val h = height.toFloat()
+        rect.set(0f, 0f, width.toFloat(), h)
+        canvas.drawRoundRect(rect, h / 2, h / 2, track)
+        val pad = context.dp(2).toFloat()
+        val r = h / 2 - pad
+        val cx = pad + r + (width - 2 * (pad + r)) * pos
+        canvas.drawCircle(cx, h / 2, r, knob)
+    }
+
+    private fun blend(a: Int, b: Int, t: Float): Int {
+        fun ch(shift: Int) = (((a shr shift) and 0xFF) + (((b shr shift) and 0xFF) - ((a shr shift) and 0xFF)) * t).toInt() and 0xFF
+        return (ch(24) shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+    }
 }

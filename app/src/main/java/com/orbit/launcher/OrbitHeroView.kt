@@ -76,7 +76,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         greetingView = context.label("", 30f, Color.WHITE, IosType.bold).apply {
             setAutoSizeTextTypeUniformWithConfiguration(20, 30, 1, TypedValue.COMPLEX_UNIT_SP)
             setShadowLayer(10f, 0f, 1f, shadow)
-            pressable { askName(first = false) }
+            pressable { OrbitSettings.show(context) }
         }
         subline = context.label("", 15f, 0xE6FFFFFF.toInt(), IosType.medium).apply {
             setShadowLayer(8f, 0f, 1f, shadow)
@@ -193,6 +193,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
 
     /** Runs whenever you come back to the home screen. Greets once per morning, afternoon and evening. */
     private fun onHomeShown() {
+        OrbitNav.safetyCheck(context)
         updateGreeting()
         refreshSubline()
         refreshLeaflet()
@@ -210,6 +211,8 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             OrbitProfile.setLastGreeting(context, key)
             say(greetingSummary(name, now))
         }
+        // Xiaomi turns its own gestures off for other launchers: offer Orbit's, once
+        ui.postDelayed({ if (attached && hasWindowFocus()) OrbitSettings.maybeOfferGestures(context) }, 1500)
     }
 
     private fun periodKey(now: LocalDateTime) = now.toLocalDate().toString() + "-" + OrbitBrain.partOfDay(now.hour)
@@ -593,36 +596,18 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         words.addAll(OrbitAssistant.cachedApps().map { it.label }.distinct().take(60))
         words.addAll(listOf(
             "remind me", "every day", "every weekday", "every month", "tomorrow", "tonight",
-            "what's next", "what's due", "what does my day look like", "open", "call", "play"
+            "what's next", "what's due", "what does my day look like", "open", "call", "play",
+            "orbit settings", "gesture settings"
         ))
         OrbitProfile.name(context).takeIf { it.isNotBlank() }?.let { words.add(it) }
         return words
     }
 
-    private val accents = listOf(
-        "en-ZA" to "English (South Africa) · closest to Zimbabwe",
-        "en-KE" to "English (Kenya)",
-        "en-NG" to "English (Nigeria)",
-        "en-GB" to "English (UK)",
-        "en-US" to "English (US)",
-        "" to "Phone default"
-    )
-
-    private fun accentName(tag: String) = accents.firstOrNull { it.first == tag }?.second?.substringBefore(" ·") ?: "phone default"
+    private fun accentName(tag: String) = OrbitVoice.name(tag)
 
     /** Lets you pick which English the speech recogniser listens for. Hold the "Tap to talk" pill, or say "change accent". */
     private fun chooseAccent() {
-        val act = context.findActivity() ?: return
-        val current = accents.indexOfFirst { it.first == OrbitProfile.speechLocale(context) }.coerceAtLeast(0)
-        AlertDialog.Builder(act, dialogTheme)
-            .setTitle("Voice Accent")
-            .setSingleChoiceItems(accents.map { it.second }.toTypedArray(), current) { d, which ->
-                OrbitProfile.setSpeechLocale(context, accents[which].first)
-                d.dismiss()
-                setCaption("Listening for ${accentName(accents[which].first)}", mic = true)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
+        OrbitVoice.choose(context) { tag -> setCaption("Listening for ${accentName(tag)}", mic = true) }
     }
 
     private fun handle(raw: String) {
@@ -651,6 +636,10 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             HeroIntent.WhatsNext -> say(whatsNext(now, who))
             HeroIntent.WhatsDue -> say(whatsDue(now, who))
             HeroIntent.VoiceSettings -> chooseAccent()
+            HeroIntent.Settings -> {
+                say("Here are your Orbit settings$who.")
+                OrbitSettings.show(context)
+            }
             HeroIntent.ClearDone -> {
                 val n = ReminderStore.clearDone(context)
                 say(if (n == 0) "There's nothing ticked off to clear$who." else "Cleared $n completed task${if (n == 1) "" else "s"}.")

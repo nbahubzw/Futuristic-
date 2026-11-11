@@ -423,7 +423,11 @@ class ReminderReceiver : BroadcastReceiver() {
                 ReminderStore.snooze(context, id)
                 TaskAlarmActivity.close(id)
             }
-            else -> ReminderAlarms.rescheduleAll(context) // boot, app update, clock or time zone change
+            else -> {
+                ReminderAlarms.rescheduleAll(context) // boot, app update, clock or time zone change
+                // After a restart or update, never leave the buttons hidden without Orbit's gestures
+                if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) OrbitNav.safetyCheck(context)
+            }
         }
     }
 }

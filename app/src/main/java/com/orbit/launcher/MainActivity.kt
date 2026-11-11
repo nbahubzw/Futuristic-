@@ -130,6 +130,7 @@ fun LauncherRoot(model: LauncherModel, stopSignal: Int, homeSignal: Int, onWallp
         val anyOpen = menu != null || spotlight || notifications || folder != null || removing != null || editing
         val assistantOpen = OrbitAssistant.dismiss()
         val tasksOpen = OrbitTasks.dismiss()
+        val settingsOpen = OrbitSettings.dismiss()
         menu = null
         spotlight = false
         notifications = false
@@ -137,7 +138,7 @@ fun LauncherRoot(model: LauncherModel, stopSignal: Int, homeSignal: Int, onWallp
         removing = null
         editing = false
         focusManager.clearFocus()
-        return anyOpen || assistantOpen || tasksOpen
+        return anyOpen || assistantOpen || tasksOpen || settingsOpen
     }
 
     LaunchedEffect(stopSignal) { if (stopSignal > 0) closeAll() }
