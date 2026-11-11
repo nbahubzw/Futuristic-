@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="orbit_gestures_label">Orbit Gestures</string>
+    <string name="orbit_gestures_description">Gives you iOS-style swipe gestures: swipe up from the bottom to go home, swipe up and hold for recent apps, and swipe in from either side to go back. Orbit only checks whether the keyboard is open so the home bar can step aside. It does not read, store or share anything on your screen.</string>
+</resources>
