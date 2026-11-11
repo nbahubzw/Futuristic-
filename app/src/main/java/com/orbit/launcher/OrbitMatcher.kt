@@ -18,6 +18,11 @@ internal object OrbitMatcher {
     private val CALL = Regex("^(?:call|ring|phone|dial)\\s+(.+)$")
     private val OPEN = Regex("^(?:open|launch|start|run|play|go to|goto|show me|show|take me to)\\s+(.+)$")
     private val LEADING_ARTICLE = Regex("^(?:the|my)\\s+")
+    private val HARD_OPEN = Regex("^(?:open|launch|start|run)\\s+(.+)$")
+    private val QUESTION = Regex(
+        "^(?:what|whats|who|whos|why|how|hows|when|where|which|is|are|am|can|could|should|would|will|do|does|did|tell|explain|" +
+            "write|give|help|translate|define|describe|recommend|suggest|i|im|ive|id|my|lets|let|you|your)\\b"
+    )
     private val NUMBER = Regex("^[+*#0-9]{2,20}$")
     private val NUMBER_JUNK = Regex("[\\s().-]")
 
@@ -83,6 +88,28 @@ internal object OrbitMatcher {
             if (top == null || top.second < 1000) return OrbitCommand.ShowGroup(group)
         }
         return if (top != null) OrbitCommand.OpenApp(top.first) else OrbitCommand.NotFound(target)
+    }
+
+    /**
+     * True when this is about opening an app or calling someone, false when it's a question or a chat
+     * (so "how are you" goes to Orbit's AI instead of opening YouTube).
+     */
+    fun isCommand(raw: String, apps: List<AssistantApp>, usage: (String) -> Int): Boolean {
+        val cleaned = clean(raw)
+        if (cleaned.isEmpty()) return false
+        if (CALL.matches(cleaned) || HARD_OPEN.matches(cleaned)) return true
+        val target = targetOf(cleaned)
+        val norm = normalise(target)
+        if (norm in DIALLER_WORDS || GROUP_WORDS.containsKey(norm)) return true
+        val digits = target.replace(NUMBER_JUNK, "")
+        if (NUMBER.matches(digits) && digits.any { it.isDigit() }) return true
+        // Just an app's name, said in full ("whats app", "play store")
+        val whole = normalise(FILLER.replace(raw.lowercase(Locale.ROOT).replace(END_PUNCT, "").trim(), ""))
+        if (whole.isNotEmpty() && apps.any { it.norm == whole }) return true
+        val top = rankCleaned(cleaned, apps, usage).firstOrNull() ?: return false
+        if (OPEN.matches(cleaned)) return top.second >= 700 // "play ...", "show me ...": only a clear app match
+        if (QUESTION.containsMatchIn(cleaned.replace("'", ""))) return top.second >= 1000 // only the exact app name
+        return cleaned.split(' ').size <= 3 && top.second >= 450 // a short, slightly misspelt app name
     }
 
     fun suggestions(raw: String, apps: List<AssistantApp>, limit: Int, usage: (String) -> Int): List<AssistantApp> =

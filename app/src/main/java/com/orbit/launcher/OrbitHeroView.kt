@@ -2,6 +2,8 @@ package com.orbit.launcher
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -38,6 +40,12 @@ import java.util.Locale
 
 const val HERO_ROWS = 3
 
+private val YES_WORDS = Regex("^(?:yes|yeah|yep|yup|ya|yah|sure|ok|okay|send|send it|go ahead|do it|correct|confirm|please do|yes please)\\b", RegexOption.IGNORE_CASE)
+private val NO_WORDS = Regex("^(?:no|nope|nah|cancel|don'?t|do not|stop|never ?mind|forget it|leave it)\\b", RegexOption.IGNORE_CASE)
+private val SEPARATOR = Regex("\\s+(?:saying|that|to say|and say|with the message)\\s+|\\s*:\\s*", RegexOption.IGNORE_CASE)
+
+private val SOFT_VERB = Regex("^(?:(?:hey|hi|ok|okay)\\s+)?(?:orbit\\W*)?(?:please\\s+)?(?:play|show|go to|take me to)\\b", RegexOption.IGNORE_CASE)
+
 class OrbitHeroView(context: Context) : LinearLayout(context) {
 
     private val c = IosColors.of(context)
@@ -62,6 +70,22 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
     private var askedName = false
     private var shownGreeting = ""
     private var leafletCapacity = 4
+    private var replyAloud = true // typed in the chat: answer on screen only
+    private var listenAfterSpeech = false // Orbit asked a question out loud: listen for the answer
+    private var lastUtterance: String? = null
+    private var lastChat: OrbitMessages.Chat? = null
+    private var pendingAction: (() -> Unit)? = null // runs when you say "yes"
+    private var pendingCompose: ((String) -> Unit)? = null // your next words are the message
+
+    private val chatHost = object : OrbitChatHost {
+        override fun chatSend(text: String) = handle(text, spoken = false)
+        override fun chatListen() {
+            if (!listening) {
+                tts?.stop()
+                startListening()
+            }
+        }
+    }
 
     private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         ui.post { if (attached) { refreshLeaflet(); refreshSubline() } }
@@ -99,7 +123,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             gravity = Gravity.CENTER
             background = rounded(0x38FFFFFF, dp(15).toFloat())
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            pressable { showCommandDialog() }
+            pressable { OrbitChat.show(context, chatHost, typeNow = OrbitAI.transcript().isEmpty()) }
             setOnLongClickListener {
                 chooseAccent()
                 true
@@ -209,6 +233,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         val key = periodKey(now)
         if (OrbitProfile.lastGreeting(context) != key) {
             OrbitProfile.setLastGreeting(context, key)
+            replyAloud = true
             say(greetingSummary(name, now))
         }
         // Xiaomi turns its own gestures off for other launchers: offer Orbit's, once
@@ -482,7 +507,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
     private fun startListening() {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             setCaption("Voice isn't available. Tap here to type.")
-            showCommandDialog()
+            OrbitChat.show(context, chatHost, typeNow = true)
             return
         }
         if (!has(Manifest.permission.RECORD_AUDIO)) {
@@ -509,6 +534,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         listening = true
         avatar.mode = OrbitAvatarView.Mode.LISTENING
         setCaption("Listening…")
+        OrbitChat.setStatus("Listening…")
         avatar.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         rec.startListening(intent)
     }
@@ -537,6 +563,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         override fun onResults(results: Bundle?) {
             listening = false
             avatar.level = 0f
+            OrbitChat.setStatus(null)
             if (!attached) return
             val heard = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().filter { it.isNotBlank() }
             if (heard.isEmpty()) {
@@ -550,6 +577,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         override fun onError(error: Int) {
             listening = false
             avatar.level = 0f
+            OrbitChat.setStatus(null)
             if (!attached) return
             avatar.mode = OrbitAvatarView.Mode.IDLE
             if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
@@ -585,7 +613,8 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         if (fixed.isEmpty()) return heard.first()
         return fixed.firstOrNull { h ->
             when (val i = OrbitBrain.interpret(h, now)) {
-                is HeroIntent.Other -> apps.isEmpty() || OrbitAssistant.parse(i.raw, apps, context) !is OrbitCommand.NotFound
+                is HeroIntent.Other -> apps.isEmpty() || !OrbitAssistant.isCommand(i.raw, apps, context) ||
+                    OrbitAssistant.parse(i.raw, apps, context) !is OrbitCommand.NotFound
                 else -> true
             }
         } ?: fixed.first()
@@ -597,7 +626,8 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         words.addAll(listOf(
             "remind me", "every day", "every weekday", "every month", "tomorrow", "tonight",
             "what's next", "what's due", "what does my day look like", "open", "call", "play",
-            "orbit settings", "gesture settings"
+            "orbit settings", "gesture settings", "read my messages", "who messaged me", "reply", "WhatsApp",
+            "Spotify", "pause", "next song", "turn it up"
         ))
         OrbitProfile.name(context).takeIf { it.isNotBlank() }?.let { words.add(it) }
         return words
@@ -610,14 +640,43 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         OrbitVoice.choose(context) { tag -> setCaption("Listening for ${accentName(tag)}", mic = true) }
     }
 
-    private fun handle(raw: String) {
+    private fun handle(raw: String, spoken: Boolean = true) {
         val now = LocalDateTime.now()
         val name = OrbitProfile.name(context)
         val who = if (name.isBlank()) "" else ", $name"
+        replyAloud = spoken
+        if (!spoken) tts?.stop()
+        listenAfterSpeech = false
+        val intent = OrbitBrain.interpret(raw, now)
+        val composing = pendingCompose
+        val confirming = pendingAction
+        // Anything about your messages stays on the phone: never sent to the AI
+        val privateLine = composing != null || confirming != null || intent is HeroIntent.Messages ||
+            intent is HeroIntent.OpenChat || intent is HeroIntent.SendMessage
+        OrbitAI.record(true, raw, private = privateLine)
         setCaption("“$raw”")
         avatar.mode = OrbitAvatarView.Mode.THINKING
-        ui.postDelayed({ if (avatar.mode == OrbitAvatarView.Mode.THINKING) avatar.mode = OrbitAvatarView.Mode.IDLE }, 3000)
-        when (val intent = OrbitBrain.interpret(raw, now)) {
+        ui.postDelayed({ if (avatar.mode == OrbitAvatarView.Mode.THINKING && !OrbitAI.thinking) avatar.mode = OrbitAvatarView.Mode.IDLE }, 3000)
+
+        // Answering a question Orbit just asked
+        if (composing != null) {
+            pendingCompose = null
+            if (NO_WORDS.matches(raw.trim().trimEnd('.', '!')) || raw.trim().equals("cancel", true)) say("Okay, cancelled$who.") else composing(raw.trim())
+            return
+        }
+        if (confirming != null) {
+            pendingAction = null
+            if (YES_WORDS.containsMatchIn(raw.trim())) {
+                confirming()
+                return
+            }
+            if (NO_WORDS.containsMatchIn(raw.trim())) {
+                say("Okay, I won't send it$who.")
+                return
+            }
+        }
+
+        when (intent) {
             is HeroIntent.SetName -> {
                 OrbitProfile.setName(context, intent.name)
                 OrbitProfile.setLastGreeting(context, periodKey(now))
@@ -647,8 +706,14 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
             HeroIntent.TellTime -> say("It's ${ReminderText.spokenClock(now)}$who.")
             HeroIntent.TellDate -> say("Today is " + now.format(DateTimeFormatter.ofPattern("EEEE, d MMMM", Locale.UK)) + ".")
             HeroIntent.Hello -> say("Hello$who. What can I do for you?")
+            is HeroIntent.SmallTalk -> say(smallTalk(intent.kind, raw, who, now))
+            is HeroIntent.Messages -> readMessages(intent.from, intent.calls, who)
+            is HeroIntent.OpenChat -> openChat(intent.name, intent.app, who)
+            is HeroIntent.SendMessage -> sendMessage(intent.rest, intent.verb, intent.app, who, raw)
+            is HeroIntent.PlayMusic -> playMusic(intent.query, intent.app, who)
+            is HeroIntent.Media -> media(intent.action, who)
             HeroIntent.Thanks -> say("Any time$who.")
-            HeroIntent.Help -> say("Try: open YouTube. Call Mum. Remind me every weekday at 8 to check the stock. Or ask: what's next, what's due, or what does my day look like?")
+            HeroIntent.Help -> say("Try: open YouTube. Call Mum. Who messaged me? Message Mum that I'm on my way. Play Jah Prayzah. Remind me every weekday at 8 to check the stock. Or ask me anything at all, like what's in the news today.")
             is HeroIntent.Voice -> {
                 if (intent.on) {
                     OrbitProfile.setVoiceOn(context, true)
@@ -659,7 +724,10 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                     say("Okay$who, I'll stay quiet. Say “voice on” to hear me again.")
                 }
             }
-            is HeroIntent.Other -> runAppCommand(intent.raw, who)
+            is HeroIntent.Other -> withApps { apps ->
+                // Opening and calling stay instant; everything else goes to Orbit's AI
+                if (OrbitAssistant.isCommand(intent.raw, apps, context)) runAppCommand(intent.raw, who, raw) else askAI(raw)
+            }
             HeroIntent.Empty -> {
                 avatar.mode = OrbitAvatarView.Mode.IDLE
                 setCaption(idleHint(), mic = true)
@@ -691,7 +759,7 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
         )
     }
 
-    private fun runAppCommand(raw: String, who: String) {
+    private fun runAppCommand(raw: String, who: String, original: String = raw) {
         withApps { apps ->
             when (val cmd = OrbitAssistant.parse(raw, apps, context)) {
                 is OrbitCommand.OpenApp -> {
@@ -711,7 +779,9 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                     say("Here are your apps, sorted into groups.")
                     OrbitAssistant.show(context)
                 }
-                is OrbitCommand.NotFound -> say("Sorry$who, I couldn't find ${cmd.query}.")
+                is OrbitCommand.NotFound ->
+                    if (SOFT_VERB.containsMatchIn(original)) askAI(original) // "show me the news", "play some music"
+                    else say("Sorry$who, I couldn't find ${cmd.query}.")
                 OrbitCommand.Empty -> {
                     avatar.mode = OrbitAvatarView.Mode.IDLE
                     setCaption(idleHint(), mic = true)
@@ -780,7 +850,13 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                     }
 
                     override fun onDone(utteranceId: String?) {
-                        ui.post { if (!listening) avatar.mode = OrbitAvatarView.Mode.IDLE }
+                        ui.post {
+                            if (!listening) avatar.mode = OrbitAvatarView.Mode.IDLE
+                            if (attached && listenAfterSpeech && utteranceId == lastUtterance && !listening) {
+                                listenAfterSpeech = false
+                                startListening()
+                            }
+                        }
                     }
 
                     @Deprecated("Deprecated in Java")
@@ -791,25 +867,344 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                 ttsReady = true
                 pendingSpeech?.let {
                     pendingSpeech = null
-                    say(it)
+                    speak(it)
                 }
             }
         }
     }
 
-    /** Shows the reply under the avatar and speaks it (unless voice is off). */
-    private fun say(text: String) {
+    /** Shows the reply under the avatar, adds it to the conversation and speaks it (unless voice is off or it was typed). */
+    private fun say(
+        text: String,
+        source: OrbitAI.Source = OrbitAI.Source.LOCAL,
+        private: Boolean = false,
+        aloud: Boolean = true,
+        expectReply: Boolean = false
+    ) {
         setCaption(text)
-        if (!OrbitProfile.voiceOn(context)) {
+        OrbitAI.record(false, text, source, private)
+        if (!aloud || !OrbitProfile.voiceOn(context) || !replyAloud) {
             if (!listening) avatar.mode = OrbitAvatarView.Mode.IDLE
+            replyAloud = true
             return
         }
+        listenAfterSpeech = expectReply
+        speak(text)
+    }
+
+    private fun speak(text: String) {
         val engine = tts
         if (engine == null || !ttsReady) {
             pendingSpeech = text
             return
         }
-        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "orbit-" + SystemClock.uptimeMillis())
+        // Long answers are spoken in pieces (speech engines have a length limit)
+        val limit = minOf(TextToSpeech.getMaxSpeechInputLength() - 100, 3500)
+        val pieces = ArrayList<String>()
+        var rest = text.replace('\n', ' ')
+        while (rest.length > limit) {
+            var cut = rest.lastIndexOf(". ", limit)
+            if (cut < limit / 2) cut = rest.lastIndexOf(' ', limit)
+            if (cut <= 0) cut = limit
+            pieces.add(rest.substring(0, cut + 1))
+            rest = rest.substring(cut + 1).trimStart()
+        }
+        if (rest.isNotBlank()) pieces.add(rest)
+        for ((i, piece) in pieces.withIndex()) {
+            val id = "orbit-" + SystemClock.uptimeMillis() + "-" + i
+            lastUtterance = id
+            engine.speak(piece, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id)
+        }
+    }
+
+    // ---------------- Messages ----------------
+
+    private sealed class Target {
+        class InChat(val chat: OrbitMessages.Chat) : Target()
+        class Person(val name: String, val number: String) : Target()
+    }
+
+    private fun nameOf(t: Target) = when (t) {
+        is Target.InChat -> t.chat.title
+        is Target.Person -> t.name
+    }
+
+    private fun needAccess(who: String): Boolean {
+        if (OrbitMessages.hasAccess(context)) return false
+        say("To see your messages I need notification access$who. Switch Orbit on in the list, then ask me again.")
+        OrbitMessages.openAccessSettings(context)
+        return true
+    }
+
+    private fun currentChats(): List<OrbitMessages.Chat> =
+        if (OrbitMessages.hasAccess(context)) OrbitMessages.chats(context) else emptyList()
+
+    /** The chat you were just talking about, refreshed if it's still there. */
+    private fun recentChat(chats: List<OrbitMessages.Chat>): OrbitMessages.Chat? =
+        lastChat?.let { l -> chats.firstOrNull { it.key == l.key } ?: chats.firstOrNull { it.pkg == l.pkg && it.title == l.title } ?: l }
+            ?: chats.firstOrNull { !it.missedCall }
+
+    private fun readMessages(from: String?, calls: Boolean, who: String) {
+        if (needAccess(who)) return
+        if (!OrbitMessages.connected()) {
+            OrbitMessages.reconnect(context)
+            say("Give me a second to reconnect to your notifications$who, then ask me again.")
+            return
+        }
+        val chats = OrbitMessages.chats(context)
+        if (calls) {
+            val missed = chats.filter { it.missedCall }
+            say(
+                when {
+                    missed.isEmpty() -> "No missed calls$who."
+                    missed.size == 1 -> "You have a missed call from ${missed[0].title}."
+                    else -> "Missed calls from " + missed.take(4).joinToString(", ") { it.title } + "."
+                },
+                private = true
+            )
+            return
+        }
+        val convos = chats.filter { !it.missedCall }
+        if (from != null) {
+            val ch = OrbitMessages.find(convos, from)
+            if (ch == null) {
+                say("No new messages from $from$who.", private = true)
+                return
+            }
+            lastChat = ch
+            say(OrbitMessages.readChat(ch) + if (ch.reply != null) " Say reply, then your message." else "", private = true)
+            return
+        }
+        lastChat = convos.firstOrNull()
+        val hint = if (convos.size == 1 && convos[0].reply != null) " Say reply, then your message." else ""
+        say(OrbitMessages.summary(chats, who) + hint, private = true)
+    }
+
+    private fun openChat(name: String?, app: String?, who: String) {
+        val chats = currentChats()
+        val ch = if (name == null) recentChat(chats) else OrbitMessages.find(chats, name)
+        if (ch != null) {
+            lastChat = ch
+            say("Opening ${ch.title}.", private = true)
+            OrbitMessages.open(context, ch)
+            return
+        }
+        if (name == null) {
+            say("There's no new message to open$who.")
+            return
+        }
+        val t = resolve(name, chats, who, quiet = false) as? Target.Person ?: return
+        val sms = app == "sms" || app == "messages"
+        val ok = if (sms) OrbitMessages.smsTo(context, t.number, null)
+        else OrbitMessages.whatsappTo(context, t.number, null) || OrbitMessages.smsTo(context, t.number, null)
+        say(if (ok) "Opening your chat with ${t.name}." else "I couldn't open a chat with ${t.name}$who.", private = true)
+    }
+
+    /** Finds who you mean: someone in your notifications first, then your contacts. */
+    private fun resolve(name: String, chats: List<OrbitMessages.Chat>, who: String, quiet: Boolean): Target? {
+        val cleanName = name.trim().replace(Regex("^(?:to|my)\\s+", RegexOption.IGNORE_CASE), "")
+        if (cleanName.length < 2) return null
+        OrbitMessages.find(chats.filter { !it.missedCall }, cleanName)?.let { return Target.InChat(it) }
+        if (!has(Manifest.permission.READ_CONTACTS)) {
+            if (!quiet) {
+                ask(Manifest.permission.READ_CONTACTS)
+                say("I need access to your contacts first$who. Allow it, then ask me again.")
+            }
+            return null
+        }
+        val hit = OrbitAssistant.findContact(context, cleanName)
+        // When guessing where the name ends, only accept a contact whose name really starts that way
+        val fits = hit != null && (!quiet || hit.first.lowercase(Locale.UK).split(' ').any { it.startsWith(cleanName.lowercase(Locale.UK)) } ||
+            hit.first.lowercase(Locale.UK).startsWith(cleanName.lowercase(Locale.UK)))
+        if (hit == null || !fits) {
+            if (!quiet) say("I couldn't find $cleanName in your chats or contacts$who.")
+            return null
+        }
+        return Target.Person(hit.first, hit.second)
+    }
+
+    private fun sendMessage(rest: String, verb: String, app: String?, who: String, original: String) {
+        val chats = currentChats().filter { !it.missedCall }
+        var r = rest.trim()
+        var target: Target? = null
+        var text = ""
+        if (verb == "reply" && !r.lowercase(Locale.UK).startsWith("to ")) {
+            val ch = recentChat(chats)
+            if (ch == null) {
+                say("There's no message to reply to$who.")
+                return
+            }
+            target = Target.InChat(ch)
+            text = r.replace(Regex("^(?:saying|that|with|and say)\\s+", RegexOption.IGNORE_CASE), "")
+        } else {
+            if (verb == "reply") r = r.drop(3).trim()
+            if (r.isEmpty()) {
+                say("Who should I message$who?", expectReply = true)
+                pendingCompose = { answer -> sendMessage(answer, "message", app, who, answer) }
+                return
+            }
+            val sep = SEPARATOR.find(r)
+            if (sep != null && sep.range.first > 0) {
+                text = r.substring(sep.range.last + 1).trim()
+                target = resolve(r.substring(0, sep.range.first), chats, who, quiet = verb == "tell")
+                if (target == null) {
+                    if (verb == "tell") askAI(original)
+                    return
+                }
+            } else {
+                // No "that" or "saying": the name is the first one, two or three words ("Mum I'm late")
+                val words = r.split(' ').filter { it.isNotBlank() }
+                for (k in minOf(3, words.size) downTo 1) {
+                    val t = resolve(words.take(k).joinToString(" "), chats, who, quiet = true) ?: continue
+                    target = t
+                    text = words.drop(k).joinToString(" ")
+                    break
+                }
+                if (target == null) {
+                    when {
+                        verb == "tell" -> askAI(original)
+                        !has(Manifest.permission.READ_CONTACTS) -> {
+                            ask(Manifest.permission.READ_CONTACTS)
+                            say("I need access to your contacts first$who. Allow it, then ask me again.")
+                        }
+                        else -> say("I couldn't find ${words.first()} in your chats or contacts$who.")
+                    }
+                    return
+                }
+            }
+        }
+        val tgt = target ?: return
+        if (text.isBlank()) {
+            say("What should I say to ${nameOf(tgt)}?", private = true, expectReply = true)
+            pendingCompose = { answer -> deliver(tgt, answer, app, who) }
+            return
+        }
+        deliver(tgt, text, app, who)
+    }
+
+    private fun deliver(target: Target, text: String, app: String?, who: String) {
+        val message = text.trim().replaceFirstChar { it.uppercase(Locale.UK) }
+        when (target) {
+            is Target.InChat -> {
+                val ch = target.chat
+                lastChat = ch
+                if (ch.reply != null) {
+                    say("Send “$message” to ${ch.title} on ${ch.app}? Say yes to send it.", private = true, expectReply = true)
+                    pendingAction = {
+                        if (OrbitMessages.reply(context, ch, message)) {
+                            say("Sent to ${ch.title}$who.", private = true)
+                        } else {
+                            copyText(message)
+                            OrbitMessages.open(context, ch)
+                            say("I couldn't send it from here, so I've opened the chat and copied your message. Paste it and tap send.", private = true)
+                        }
+                    }
+                } else {
+                    copyText(message)
+                    OrbitMessages.open(context, ch)
+                    say("I've opened your chat with ${ch.title} and copied your message. Paste it and tap send.", private = true)
+                }
+            }
+            is Target.Person -> {
+                val sms = app == "sms" || app == "text" || app == "text message" || app == "messages"
+                val ok = if (sms) OrbitMessages.smsTo(context, target.number, message)
+                else OrbitMessages.whatsappTo(context, target.number, message) || OrbitMessages.smsTo(context, target.number, message)
+                say(if (ok) "Your message to ${target.name} is ready. Just tap send." else "I couldn't open a chat with ${target.name}$who.", private = true)
+            }
+        }
+    }
+
+    private fun copyText(text: String) {
+        try {
+            context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Message", text))
+        } catch (e: Exception) {
+        }
+    }
+
+    // ---------------- Music ----------------
+
+    private fun playMusic(query: String?, app: String?, who: String) {
+        if (query == null) {
+            musicReply(OrbitMedia.resume(context, app, who))
+            return
+        }
+        if (app != null) {
+            musicReply(OrbitMedia.play(context, query, app, who))
+            return
+        }
+        withApps { apps ->
+            // "play Subway Surfers" is a game, not a song
+            val cmd = "play $query"
+            if (OrbitAssistant.isCommand(cmd, apps, context) && OrbitAssistant.parse(cmd, apps, context) is OrbitCommand.OpenApp) runAppCommand(cmd, who)
+            else musicReply(OrbitMedia.play(context, query, null, who))
+        }
+    }
+
+    /** Music starting shouldn't be talked over: success shows on screen, problems are spoken. */
+    private fun musicReply(text: String) {
+        val ok = text.startsWith("Playing") || text.startsWith("Here's") || text.startsWith("Opening")
+        say(text, aloud = !ok)
+    }
+
+    private fun media(action: String, who: String) {
+        tts?.stop()
+        val spoken = OrbitMedia.control(context, action, who)
+        val caption = when (action) {
+            "pause" -> "Paused"
+            "resume" -> "Playing"
+            "next" -> "Next song"
+            "previous" -> "Previous song"
+            "mute" -> "Muted"
+            else -> spoken
+        }
+        say(caption.ifEmpty { "Done" }, aloud = false)
+    }
+
+    // ---------------- Orbit's AI ----------------
+
+    private fun askAI(question: String) {
+        val aloud = replyAloud
+        avatar.mode = OrbitAvatarView.Mode.THINKING
+        setCaption("Thinking…")
+        OrbitAI.setThinking(true)
+        OrbitAI.ask(context, question) { reply ->
+            OrbitAI.setThinking(false)
+            if (!attached) {
+                OrbitAI.record(false, reply.text, reply.source)
+                return@ask
+            }
+            replyAloud = aloud
+            say(reply.text, reply.source)
+        }
+    }
+
+    private fun smallTalk(kind: String, raw: String, who: String, now: LocalDateTime): String {
+        val first = raw.trim().lowercase(Locale.UK).substringBefore(' ').trimEnd(',', '!', '.', '?')
+        return when (kind) {
+            "how_are_you" -> listOf(
+                "I'm doing well, thanks$who. How can I help?",
+                "All good here$who. What can I do for you?",
+                "Very well, thank you$who. What's on your mind?"
+            ).random()
+            "makadii" -> "Ndiripo, makadiiwo$who?"
+            "shona_hello" -> when (first) {
+                "mangwanani" -> "Mangwanani$who! What can I do for you this morning?"
+                "masikati" -> "Masikati$who! What can I do for you?"
+                "manheru" -> "Manheru$who! What can I do for you?"
+                else -> "Mhoro$who! What can I do for you?"
+            }
+            "who" -> "I'm Orbit, your assistant$who. I can open apps, make calls, keep your tasks and reminders, and answer just about anything you ask."
+            "night" -> {
+                val tomorrow = openTasks().mapNotNull { r -> r.local()?.let { r to it } }
+                    .filter { it.second.toLocalDate() == now.toLocalDate().plusDays(1) }
+                    .minByOrNull { it.second }
+                if (tomorrow == null) "Good night$who. Sleep well."
+                else "Good night$who. Your first task tomorrow is ${lowerFirst(tomorrow.first.text)} at ${ReminderText.spokenClock(tomorrow.second)}. Sleep well."
+            }
+            "bye" -> "Bye for now$who."
+            "praise" -> "Thank you$who, that's kind of you."
+            else -> "Hello$who."
+        }
     }
 
     // ---------------- Dialogs ----------------
@@ -837,23 +1232,6 @@ class OrbitHeroView(context: Context) : LinearLayout(context) {
                 }
             }
             .setNegativeButton("Later", null)
-            .create()
-        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
-        d.show()
-        field.requestFocus()
-    }
-
-    private fun showCommandDialog() {
-        val act = context.findActivity() ?: return
-        val field = field("Open YouTube, remind me to…")
-        val d = AlertDialog.Builder(act, dialogTheme)
-            .setTitle("Ask Orbit")
-            .setView(padded(field))
-            .setPositiveButton("Go") { _, _ ->
-                val t = field.text.toString().trim()
-                if (t.isNotEmpty()) handle(t)
-            }
-            .setNegativeButton("Cancel", null)
             .create()
         d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
         d.show()

@@ -22,6 +22,12 @@ sealed class HeroIntent {
     object WhatsDue : HeroIntent()
     object VoiceSettings : HeroIntent()
     object Settings : HeroIntent()
+    data class SmallTalk(val kind: String) : HeroIntent()
+    data class Messages(val from: String?, val calls: Boolean = false) : HeroIntent()
+    data class OpenChat(val name: String?, val app: String?) : HeroIntent()
+    data class SendMessage(val rest: String, val verb: String, val app: String?) : HeroIntent()
+    data class PlayMusic(val query: String?, val app: String?) : HeroIntent()
+    data class Media(val action: String) : HeroIntent()
     object ClearDone : HeroIntent()
     object TellTime : HeroIntent()
     object TellDate : HeroIntent()
@@ -65,7 +71,7 @@ object OrbitBrain {
         IC
     )
     private val NEXT_Q = Regex("\\bwhat'?s next\\b|\\bwhat is next\\b|\\bnext (?:task|reminder|thing|up)\\b|\\bup next\\b|\\bwhat'?s coming up\\b|\\bwhat comes next\\b", IC)
-    private val DUE_Q = Regex("\\bwhat'?s due\\b|\\bwhat is due\\b|\\banything due\\b|\\b(?:what'?s |anything )?overdue\\b|\\bwhat (?:did|have) i miss(?:ed)?\\b|\\bpending\\b|\\bdue (?:now|today|soon)\\b", IC)
+    private val DUE_Q = Regex("\\bwhat'?s due\\b|\\bwhat is due\\b|\\banything due\\b|\\b(?:what'?s |anything )?overdue\\b|\\bwhat (?:did|have) i miss(?:ed)?\\b|^(?:what'?s |anything |is anything )?pending\\b|\\bdue (?:now|today|soon)\\b", IC)
     private val SETTINGS_Q = Regex(
         "\\b(?:orbit|gestures?|navigation|nav bar|launcher|home screen) settings\\b|\\bsettings (?:for|in) orbit\\b|" +
             "\\b(?:hide|show) (?:the )?(?:android )?(?:buttons|nav(?:igation)? (?:bar|buttons))\\b|" +
@@ -94,9 +100,76 @@ object OrbitBrain {
     private val CLEAR_Q = Regex("^(?:clear|delete|remove)\\b.*\\b(?:done|completed|finished|ticked)\\b", IC)
     private val MUTE = Regex("^(?:be quiet|quiet|mute|shut up|stop talking|silent(?: mode)?|voice off|don'?t (?:talk|speak))\\b", IC)
     private val UNMUTE = Regex("^(?:unmute|voice on|talk to me|speak(?: up)?|sound on)\\b", IC)
-    private val HELLO = Regex("^(?:hello|hi|hey|yo|howdy|good (?:morning|afternoon|evening|day))(?: there)?(?: orbit)?$", IC)
+    private val HELLO = Regex("^(?:hello|hi|hie|hiya|hey|yo|howdy|greetings|good (?:morning|afternoon|evening|day))(?: there)?(?: orbit)?$", IC)
+
+    // ---- Messages and calls (read from notifications on the phone) ----
+    private const val MSG = "(?:messages?|texts?|whatsapps?|whatsapp messages?|sms(?:es)?|dms?)"
+    private val CALLS_Q = Regex(
+        "^(?:who (?:called|rang|phoned)(?: me)?|did (?:anyone|anybody|someone) (?:call|ring|phone) me|(?:any |my )?missed calls?|" +
+            "(?:do i have|have i got|did i get) (?:any )?missed calls?)$",
+        IC
+    )
+    private val MSG_FROM = listOf(
+        Regex("^what (?:did|has|have) (.+?) (?:say|said|send|sent|write|wrote|message|messaged|text|texted)(?: me)?$", IC),
+        Regex("^(?:(?:read|check)(?: me)? )?(?:the |my |any )?(?:new |latest |last |unread )?$MSG from (.+)$", IC),
+        Regex("^(?:do i have|have i got|did i get|are there|is there) (?:any |a )?(?:new )?$MSG from (.+)$", IC),
+        Regex("^read (?:me )?(.+?)(?:'s|s)? (?:last |latest |new )?(?:message|messages|text|texts|whatsapp|whatsapps)$", IC),
+        Regex("^(?:did|has) (.+?) (?:messaged?|texted|text|whatsapped|whatsapp|replied|reply|written|write|responded|respond)(?: back)?(?: to)?(?: me)?(?: yet)?$", IC)
+    )
+    private val MSG_ALL = Regex(
+        "^(?:who (?:has |have )?(?:messaged|texted|whatsapped|sent)(?: me)?(?: (?:a |any )?$MSG)?|who (?:is|was) (?:messaging|texting) me|" +
+            "(?:do i have|have i got|did i get|are there|is there|any) (?:any |a )?(?:new |unread )?$MSG|(?:any )?(?:new|unread) $MSG|" +
+            "read (?:me )?(?:my |the |all )?(?:new |latest |unread |last )?(?:$MSG|notifications)|check (?:my )?$MSG|" +
+            "did (?:anyone|anybody|someone) (?:message|text|whatsapp|write to|send) me(?: anything)?|what(?:'s| is) new on whatsapp|my $MSG)$",
+        IC
+    )
+    private val OPEN_CHAT = listOf(
+        Regex("^(?:open|show|go to|take me to) (?:my |the )?(?:chat|conversation|$MSG) with (.+?)(?: on (whatsapp|telegram|messages|sms))?$", IC),
+        Regex("^(?:open|show) (?:me )?(.+?)(?:'s| s|s) (?:chat|conversation|message|messages|whatsapp|text|texts)$", IC)
+    )
+    private val OPEN_LAST = Regex(
+        "^(?:open|show)(?: me)? (?:it|that|that one|this|this one|the message|that message|that chat|the chat|" +
+            "(?:the )?(?:last|latest|new) (?:message|chat|one|text))$",
+        IC
+    )
+    private val SEND = Regex("^(send (?:a |an )?(?:message|text|whatsapp|whatsapp message|sms) to|message|text|whatsapp|sms|tell|reply|respond|answer)(?:\\s+(.+))?$", IC)
+    private val VIA = Regex("\\s+(?:on|via|by|through|using) (whatsapp|sms|text message|text|telegram|messages)\\b", IC)
+
+    // ---- Music ----
+    private const val PLAYERS = "spotify|youtube music|youtube|you tube|audiomack|audio mack|boomplay|boom play|apple music|deezer|soundcloud"
+    private val PLAY = Regex("^(?:play|put on|listen to)(?: me)? (.+?)(?: (?:on|in|from|using) ($PLAYERS))?$", IC)
+    private val GENERIC_MUSIC = Regex("^(?:some |my |the |a )?(?:music|songs?|tunes|playlist|something|jams|track)(?: (?:please|now))?$", IC)
+    private val MEDIA = listOf(
+        "pause" to Regex("^(?:pause|stop)(?: (?:the |my |this )?(?:music|song|track|audio|playback|video|playing))?$", IC),
+        "resume" to Regex("^(?:resume|continue|unpause|carry on|keep playing)(?: (?:the |my )?(?:music|song|playing|playback|track))?$|^(?:play|start)(?: the)? music again$", IC),
+        "next" to Regex("^(?:next|skip)(?: (?:the |this )?(?:song|track|one|it))?$|^(?:play )?(?:the )?next (?:song|track)$", IC),
+        "previous" to Regex("^previous(?: (?:song|track))?$|^(?:play )?(?:the )?(?:previous|last) (?:song|track)$|^go back (?:a |one )?(?:song|track)$", IC),
+        "louder" to Regex("^(?:turn (?:it|the (?:volume|music|sound)) up|turn up(?: the)?(?: (?:volume|music|sound))?|volume up|louder|increase(?: the)? volume|make it louder)$", IC),
+        "quieter" to Regex("^(?:turn (?:it|the (?:volume|music|sound)) down|turn down(?: the)?(?: (?:volume|music|sound))?|volume down|(?:a bit )?(?:quieter|softer)|lower(?: the)? volume|decrease(?: the)? volume|make it quieter)$", IC),
+        "mute" to Regex("^mute (?:the )?(?:music|sound|volume|phone)$", IC),
+        "unmute" to Regex("^unmute (?:the )?(?:music|sound|volume|phone)$", IC)
+    )
+
+    // Everyday small talk, answered instantly without data
+    private val SMALL_TALK = listOf(
+        "shona_hello" to Regex("^(?:mhoro|mhoroi|mhorooo|mangwanani|masikati|manheru)(?: orbit)?$", IC),
+        "makadii" to Regex("^(?:makadii|makadini|wakadii|makadi)(?: orbit)?$", IC),
+        "how_are_you" to Regex(
+            "^(?:how are you(?: doing)?(?: today)?|how(?:'s| is) it going|how do you do|how(?:'s| is) your day(?: going)?|" +
+                "are you (?:ok|okay|well|good|alright)|you (?:ok|okay|good|alright)|what'?s up|wh?atsup|wassup|sup|how have you been|how are things)(?: orbit)?$",
+            IC
+        ),
+        "who" to Regex("^(?:who are you|what are you|what'?s your name|what is your name|introduce yourself|tell me about yourself)$", IC),
+        "night" to Regex("^(?:good ?night|night night|nighty night|sleep well)(?: orbit)?$", IC),
+        "bye" to Regex("^(?:bye|goodbye|bye bye|see you(?: later| soon)?|catch you later|talk later)(?: orbit)?$", IC),
+        "praise" to Regex(
+            "^(?:i love you|love you|you(?:'re| are) (?:great|amazing|awesome|the best|so smart|smart|clever|funny|brilliant|cool|a star)|" +
+                "good job|well done|nice work|good bot|you rock)(?: orbit)?$",
+            IC
+        )
+    )
     private val THANKS = Regex("^(?:thanks|thank you|cheers|nice one|great|awesome|perfect)\\b", IC)
-    private val HELP = Regex("^(?:help|what can you do|what do you do|commands)\\b", IC)
+    private val HELP = Regex("^(?:help|what can you do|what do you do|commands|what can i say|what can i ask you)(?: orbit)?$", IC)
 
     fun interpret(raw: String, now: LocalDateTime): HeroIntent {
         val text = raw.trim().replace(Regex("\\s+"), " ").trimEnd('.', '!', '?')
@@ -110,20 +183,75 @@ object OrbitBrain {
         }
         if (REMIND.containsMatchIn(s)) return HeroIntent.AddReminder(parseReminder(s, now))
         if (SETTINGS_Q.containsMatchIn(text)) return HeroIntent.Settings
-        if (TIME_Q.containsMatchIn(s)) return HeroIntent.TellTime
+        messagingOrMusic(s)?.let { return it }
+        // Long sentences are real questions for the AI, even if they mention "today" or "due"
+        val long = s.split(' ').size > 9
+        if (TIME_Q.containsMatchIn(s) && !Regex("\\btime (?:in|at|for)\\b", IC).containsMatchIn(s)) return HeroIntent.TellTime
         if (DATE_Q.containsMatchIn(s)) return HeroIntent.TellDate
         if (CLEAR_Q.containsMatchIn(s)) return HeroIntent.ClearDone
         if (ACCENT_Q.containsMatchIn(s)) return HeroIntent.VoiceSettings
-        if (DUE_Q.containsMatchIn(s)) return HeroIntent.WhatsDue
-        if (NEXT_Q.containsMatchIn(s)) return HeroIntent.WhatsNext
-        if (DAY_Q.containsMatchIn(s)) return HeroIntent.DayBrief(if (Regex("\\btomorrow\\b", IC).containsMatchIn(s)) 1 else 0)
-        if (LIST_Q.containsMatchIn(s)) return HeroIntent.ListReminders
+        if (!long && DUE_Q.containsMatchIn(s)) return HeroIntent.WhatsDue
+        if (!long && NEXT_Q.containsMatchIn(s)) return HeroIntent.WhatsNext
+        if (!long && DAY_Q.containsMatchIn(s)) return HeroIntent.DayBrief(if (Regex("\\btomorrow\\b", IC).containsMatchIn(s)) 1 else 0)
+        if (!long && LIST_Q.containsMatchIn(s)) return HeroIntent.ListReminders
         if (MUTE.containsMatchIn(s)) return HeroIntent.Voice(false)
         if (UNMUTE.containsMatchIn(s)) return HeroIntent.Voice(true)
         if (HELLO.matches(s)) return HeroIntent.Hello
-        if (THANKS.containsMatchIn(s)) return HeroIntent.Thanks
-        if (HELP.containsMatchIn(s)) return HeroIntent.Help
+        val bare = s.replace(",", "").replace(Regex("\\s+"), " ").trim()
+        for ((kind, r) in SMALL_TALK) if (r.matches(bare)) return HeroIntent.SmallTalk(kind)
+        // Only short thanks; "great, now tell me about Mars" is a question
+        if (bare.split(' ').size <= 4 && THANKS.containsMatchIn(s)) return HeroIntent.Thanks
+        if (HELP.matches(bare)) return HeroIntent.Help
         return HeroIntent.Other(s)
+    }
+
+    private val NOT_A_NAME = setOf("you", "u", "i", "get", "got", "see", "read", "send", "your", "we", "they")
+    private val NOBODY = setOf("anyone", "anybody", "someone", "somebody", "my", "the", "new", "all", "any", "me", "latest", "last", "unread")
+
+    /** Messages, chats, calls and music. Null when it's something else. */
+    private fun messagingOrMusic(raw: String): HeroIntent? {
+        val s = raw.replace(",", "").replace(Regex("\\s+"), " ").trim()
+        for ((action, r) in MEDIA) if (r.matches(s)) return HeroIntent.Media(action)
+        if (CALLS_Q.matches(s)) return HeroIntent.Messages(null, calls = true)
+        for (r in MSG_FROM) {
+            val m = r.matchEntire(s) ?: continue
+            val who = m.groupValues[1].trim().replace(Regex("^(?:my|the)\\s+", IC), "")
+            val words = who.lowercase(Locale.ROOT).split(' ')
+            // "what did you say", "did you get my message": not about someone's messages
+            if (words.size > 3 || words.any { it in NOT_A_NAME }) continue
+            return HeroIntent.Messages(if (who.lowercase(Locale.ROOT) in NOBODY) null else who)
+        }
+        if (MSG_ALL.matches(s)) return HeroIntent.Messages(null)
+        if (OPEN_LAST.matches(s)) return HeroIntent.OpenChat(null, null)
+        for (r in OPEN_CHAT) {
+            val m = r.matchEntire(s) ?: continue
+            val name = m.groupValues[1].trim()
+            if (name.isEmpty() || name.lowercase(Locale.ROOT) in NOBODY) return HeroIntent.OpenChat(null, null)
+            return HeroIntent.OpenChat(name, m.groupValues.getOrNull(2)?.ifEmpty { null })
+        }
+        SEND.matchEntire(s)?.let { m ->
+            val verb = m.groupValues[1].lowercase(Locale.ROOT).substringBefore(' ')
+            var rest = m.groupValues[2].trim()
+            val first = rest.substringBefore(' ').lowercase(Locale.ROOT)
+            // "tell me a joke" and "text me a recipe" are questions, not messages
+            if (first == "me" || first == "us" || first == "myself") return null
+            if (verb == "tell" && rest.isEmpty()) return null
+            var app: String? = null
+            VIA.find(rest)?.let { v ->
+                app = v.groupValues[1].lowercase(Locale.ROOT)
+                rest = rest.removeRange(v.range).replace(Regex("\\s+"), " ").trim()
+            }
+            if (verb == "sms") app = app ?: "sms"
+            return HeroIntent.SendMessage(rest, if (verb == "respond" || verb == "answer") "reply" else verb, app)
+        }
+        PLAY.matchEntire(s)?.let { m ->
+            var q = m.groupValues[1].trim().replace(Regex("^(?:the )?(?:song|track|album|playlist) ", IC), "")
+            val app = m.groupValues.getOrNull(2)?.ifEmpty { null }?.lowercase(Locale.ROOT)?.replace("you tube", "youtube")?.replace("audio mack", "audiomack")?.replace("boom play", "boomplay")
+            if (GENERIC_MUSIC.matches(q)) return HeroIntent.PlayMusic(null, app)
+            q = q.replace(Regex("\\s+(?:please|for me|now)$", IC), "")
+            return HeroIntent.PlayMusic(q, app)
+        }
+        return null
     }
 
     /** "roy  please" -> "Roy". Keeps at most three words. */

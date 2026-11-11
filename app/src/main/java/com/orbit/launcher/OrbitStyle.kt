@@ -150,8 +150,8 @@ class CheckCircle(context: Context, private val colors: IosColors) : View(contex
 }
 
 /** Small line icons drawn in code, in the spirit of SF Symbols. */
-class Glyph(context: Context, private val kind: Kind, var color: Int, private val strokeDp: Float = 1.8f) : View(context) {
-    enum class Kind { PLUS, CHEVRON, MIC, CALENDAR, CLOCK, REPEAT, LIST, BELL, KEYBOARD, SUN, PERSON, SPEAKER, SWIPE, NAVBAR, BACK, BAR, WAVE, GEAR }
+class Glyph(context: Context, var kind: Kind, var color: Int, private val strokeDp: Float = 1.8f) : View(context) {
+    enum class Kind { PLUS, CHEVRON, MIC, CALENDAR, CLOCK, REPEAT, LIST, BELL, KEYBOARD, SUN, PERSON, SPEAKER, SWIPE, NAVBAR, BACK, BAR, WAVE, GEAR, SPARKLE, CHIP, SEND, KEY, DOWNLOAD }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -289,6 +289,51 @@ class Glyph(context: Context, private val kind: Kind, var color: Int, private va
                     val sn = Math.sin(a).toFloat()
                     canvas.drawLine(x(12f + c * 6.6f), y(12f + sn * 6.6f), x(12f + c * 9f), y(12f + sn * 9f), paint)
                 }
+            }
+            Kind.SPARKLE -> {
+                // A four-pointed star with a small companion, the usual mark for AI
+                fun star(cx: Float, cy: Float, r: Float) {
+                    path.moveTo(x(cx), y(cy - r))
+                    path.quadTo(x(cx + r * 0.16f), y(cy - r * 0.16f), x(cx + r), y(cy))
+                    path.quadTo(x(cx + r * 0.16f), y(cy + r * 0.16f), x(cx), y(cy + r))
+                    path.quadTo(x(cx - r * 0.16f), y(cy + r * 0.16f), x(cx - r), y(cy))
+                    path.quadTo(x(cx - r * 0.16f), y(cy - r * 0.16f), x(cx), y(cy - r))
+                    path.close()
+                }
+                star(10.5f, 13f, 7.5f)
+                star(18.2f, 5.8f, 3.2f)
+                paint.style = Paint.Style.FILL
+                canvas.drawPath(path, paint)
+            }
+            Kind.CHIP -> {
+                oval.set(x(6.5f), y(6.5f), x(17.5f), y(17.5f))
+                canvas.drawRoundRect(oval, 2f * s, 2f * s, paint)
+                oval.set(x(9.5f), y(9.5f), x(14.5f), y(14.5f))
+                canvas.drawRect(oval, paint)
+                for (v in floatArrayOf(9.5f, 12f, 14.5f)) {
+                    canvas.drawLine(x(v), y(3.5f), x(v), y(6.5f), paint)
+                    canvas.drawLine(x(v), y(17.5f), x(v), y(20.5f), paint)
+                    canvas.drawLine(x(3.5f), y(v), x(6.5f), y(v), paint)
+                    canvas.drawLine(x(17.5f), y(v), x(20.5f), y(v), paint)
+                }
+            }
+            Kind.SEND -> {
+                canvas.drawLine(x(12f), y(19f), x(12f), y(5.5f), paint)
+                path.moveTo(x(6.5f), y(11f)); path.lineTo(x(12f), y(5.5f)); path.lineTo(x(17.5f), y(11f))
+                canvas.drawPath(path, paint)
+            }
+            Kind.KEY -> {
+                canvas.drawCircle(x(8f), y(12f), 4f * s, paint)
+                path.moveTo(x(12f), y(12f)); path.lineTo(x(20.5f), y(12f))
+                path.moveTo(x(17.5f), y(12f)); path.lineTo(x(17.5f), y(15.5f))
+                path.moveTo(x(20.5f), y(12f)); path.lineTo(x(20.5f), y(14.5f))
+                canvas.drawPath(path, paint)
+            }
+            Kind.DOWNLOAD -> {
+                canvas.drawLine(x(12f), y(4f), x(12f), y(15f), paint)
+                path.moveTo(x(7.5f), y(10.5f)); path.lineTo(x(12f), y(15f)); path.lineTo(x(16.5f), y(10.5f))
+                path.moveTo(x(5f), y(16.5f)); path.lineTo(x(5f), y(19.5f)); path.lineTo(x(19f), y(19.5f)); path.lineTo(x(19f), y(16.5f))
+                canvas.drawPath(path, paint)
             }
             Kind.SUN -> {
                 canvas.drawCircle(x(12f), y(12f), 4f * s, paint)

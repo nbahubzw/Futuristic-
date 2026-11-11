@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.StatFs
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
@@ -234,6 +235,27 @@ class OrbitSettingsSheet(private val activity: Activity) : Dialog(activity, andr
         )))
         content.addView(footer("Hold the “Tap to talk” pill or say “change accent” to switch quickly."))
 
+        // Intelligence: answering anything
+        content.addView(header("Intelligence"))
+        val key = OrbitAI.geminiKey(ctx)
+        val dl = OrbitOffline.progress(ctx)
+        if (dl != null && dl.failed) Toast.makeText(ctx, "The offline brain download failed. Check your data and try again.", Toast.LENGTH_LONG).show()
+        val offlineValue = when {
+            dl != null && !dl.failed -> "Downloading ${dl.percent}%"
+            OrbitOffline.ready(ctx) -> OrbitOffline.modelName(ctx)
+            else -> "Off"
+        }
+        content.addView(group(listOf(
+            valueRow(Glyph.Kind.SPARKLE, c.indigo, "Online AI", if (key.isBlank()) "Off" else "Gemini") { editGeminiKey() },
+            valueRow(Glyph.Kind.CHIP, c.teal, "Offline Brain", offlineValue) { offlineOptions() }
+        )))
+        content.addView(footer(
+            "Ask Orbit anything. Online AI uses Google Gemini with a free key and a little mobile data per question. " +
+                "The offline brain runs on this phone with no data, but it's less clever. With both, Orbit uses Gemini when you're online and the offline brain when you're not."
+        ))
+        content.removeCallbacks(progressTick)
+        if (dl != null && !dl.failed) content.postDelayed(progressTick, 1000)
+
         // Navigation gestures
         content.addView(header("Navigation Gestures"))
         val hide = switchRow(Glyph.Kind.NAVBAR, c.indigo, "Hide Android Buttons", want && allowed && gestures) { on ->
@@ -337,6 +359,183 @@ class OrbitSettingsSheet(private val activity: Activity) : Dialog(activity, andr
         }
         row.addView(sw)
         return row
+    }
+
+    private val progressTick = Runnable { if (isShowing) render() }
+
+    // ---------------- Intelligence ----------------
+
+    private fun editGeminiKey() {
+        val ctx = context
+        val current = OrbitAI.geminiKey(ctx)
+        val field = EditText(ctx).apply {
+            setText(current)
+            setSelection(text.length)
+            hint = "Paste your key here"
+            setSingleLine()
+            typeface = Typeface.MONOSPACE
+            textSize = 14f
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        }
+        val wrap = FrameLayout(ctx).apply {
+            setPadding(ctx.dp(22), ctx.dp(4), ctx.dp(22), 0)
+            addView(field)
+        }
+        val b = AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+            .setTitle("Online AI")
+            .setMessage(
+                "Orbit uses Google Gemini to answer anything. The key is free:\n\n" +
+                    "1. Tap Get Free Key and sign in with your Google account.\n" +
+                    "2. Tap Create API key, then copy it.\n" +
+                    "3. Come back here, paste it and tap Save."
+            )
+            .setView(wrap)
+            .setPositiveButton("Save") { _, _ -> saveKey(field.text.toString().trim()) }
+            .setNeutralButton("Get Free Key") { _, _ ->
+                try {
+                    activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey")))
+                } catch (e: Exception) {
+                }
+            }
+        if (current.isNotBlank()) {
+            b.setNegativeButton("Turn Off") { _, _ ->
+                OrbitAI.setGeminiKey(ctx, "")
+                render()
+            }
+        } else b.setNegativeButton("Cancel", null)
+        val d = b.create()
+        d.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+        d.show()
+    }
+
+    private fun saveKey(key: String) {
+        val ctx = context
+        if (key.isBlank()) {
+            OrbitAI.setGeminiKey(ctx, "")
+            render()
+            return
+        }
+        Toast.makeText(ctx, "Checking your key…", Toast.LENGTH_SHORT).show()
+        OrbitAI.testKey(ctx, key) { ok, message ->
+            if (!isShowing) {
+                if (ok) OrbitAI.setGeminiKey(ctx, key)
+                return@testKey
+            }
+            if (ok) {
+                OrbitAI.setGeminiKey(ctx, key)
+                Toast.makeText(ctx, "Gemini is on. Ask Orbit anything.", Toast.LENGTH_LONG).show()
+                render()
+            } else {
+                AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+                    .setTitle("That key didn't work")
+                    .setMessage(message)
+                    .setPositiveButton("Save Anyway") { _, _ ->
+                        OrbitAI.setGeminiKey(ctx, key)
+                        render()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun offlineOptions() {
+        val ctx = context
+        val dl = OrbitOffline.progress(ctx)
+        if (dl != null && !dl.failed) {
+            AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+                .setTitle("Offline Brain")
+                .setMessage("Downloading, ${dl.percent}% done. You can keep using your phone; it carries on in the background.")
+                .setPositiveButton("OK", null)
+                .setNegativeButton("Stop Download") { _, _ ->
+                    OrbitOffline.cancelDownload(ctx)
+                    render()
+                }
+                .show()
+            return
+        }
+        val ready = OrbitOffline.ready(ctx)
+        val q = OrbitOffline.QUICK
+        val items = ArrayList<Pair<String, () -> Unit>>()
+        items.add("Download ${q.title} (${q.sizeMb} MB)" to { confirmDownload() })
+        items.add("Get Gemma 3, smarter (529 MB)" to { gemmaGuide() })
+        items.add("Use a Downloaded File" to { importFile() })
+        if (ready) items.add("Delete Offline Brain" to { confirmDelete() })
+        AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+            .setTitle(if (ready) "Offline Brain: ${OrbitOffline.modelName(ctx)}, ${OrbitOffline.sizeText(ctx)}" else "Offline Brain")
+            .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun freeMb(): Long = try {
+        StatFs(OrbitOffline.dir(context).absolutePath).availableBytes / (1024 * 1024)
+    } catch (e: Exception) {
+        Long.MAX_VALUE
+    }
+
+    private fun confirmDownload() {
+        val ctx = context
+        val q = OrbitOffline.QUICK
+        if (freeMb() < q.sizeMb + 300) {
+            Toast.makeText(ctx, "Not enough space. Free up about ${q.sizeMb + 300} MB and try again.", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+            .setTitle("Download ${q.title}?")
+            .setMessage("${q.detail}. This downloads about ${q.sizeMb} MB once, so use Wi-Fi or a data bundle. After that, Orbit can answer questions with no data at all.")
+            .setPositiveButton("Download") { _, _ ->
+                if (OrbitOffline.startDownload(ctx, q)) {
+                    Toast.makeText(ctx, "Downloading. You'll see progress in your notifications.", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(ctx, "The download couldn't start. Please try again.", Toast.LENGTH_LONG).show()
+                }
+                render()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun gemmaGuide() {
+        AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+            .setTitle("Get Gemma 3")
+            .setMessage(
+                "Gemma 3 is Google's small model and gives better answers. Google asks you to accept its licence first, so it downloads in your browser:\n\n" +
+                    "1. Tap Open Page.\n" +
+                    "2. Sign in, or make a free Hugging Face account.\n" +
+                    "3. Accept the Gemma licence on that page.\n" +
+                    "4. Open Files and versions and download ${OrbitOffline.GEMMA_FILE} (529 MB).\n" +
+                    "5. Come back here and choose Use a Downloaded File."
+            )
+            .setPositiveButton("Open Page") { _, _ ->
+                try {
+                    activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(OrbitOffline.GEMMA_PAGE)))
+                } catch (e: Exception) {
+                }
+            }
+            .setNeutralButton("Use a Downloaded File") { _, _ -> importFile() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun importFile() {
+        try {
+            activity.startActivity(Intent(activity, ModelImportActivity::class.java))
+        } catch (e: Exception) {
+            Toast.makeText(context, "Couldn't open the file picker", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun confirmDelete() {
+        AlertDialog.Builder(activity, OrbitSettings.dialogTheme(activity))
+            .setTitle("Delete the offline brain?")
+            .setMessage("This frees ${OrbitOffline.sizeText(context)}. Orbit will still answer with Gemini when you're online.")
+            .setPositiveButton("Delete") { _, _ ->
+                OrbitOffline.delete(context)
+                render()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun editName() {

@@ -143,6 +143,10 @@ object OrbitAssistant {
     fun parse(raw: String, apps: List<AssistantApp>, context: Context): OrbitCommand =
         OrbitMatcher.parse(raw, apps, usageOf(context))
 
+    /** Opening or calling (true) versus a question for Orbit's AI (false). */
+    fun isCommand(raw: String, apps: List<AssistantApp>, context: Context): Boolean =
+        OrbitMatcher.isCommand(raw, apps, usageOf(context))
+
     fun suggestions(raw: String, apps: List<AssistantApp>, context: Context, limit: Int = 6): List<AssistantApp> =
         OrbitMatcher.suggestions(raw, apps, limit, usageOf(context))
 
