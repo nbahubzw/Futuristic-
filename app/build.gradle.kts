@@ -15,6 +15,15 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    // One fixed key, so each new build installs over the old one (keeps your tasks and Orbit's permissions)
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("orbit-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
         release { isMinifyEnabled = false }
     }
